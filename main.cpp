@@ -198,19 +198,78 @@ bool updateMember(sqlite3* db, const Member& member)
     return success;
 }
 
+void processMember(sqlite3* db, const Member& member);
+
+void synchronizeMembers(
+    sqlite3* db,
+    const vector<Member>& members
+)
+{
+    for (const auto& member : members)
+    {
+        processMember(db, member);
+    }
+}
+void processMember(
+    sqlite3* db,
+    const Member& member
+)
+{
+    if (!validateMember(member))
+    {
+        logError("Invalid member: " + member.member_id);
+        return;
+    }
+
+    if (memberExists(db, member.member_id))
+    {
+        cout << "Updating member: " << member.member_id << endl;
+        updateMember(db, member);
+    }
+    else
+    {
+        cout << "Inserting member: " << member.member_id << endl;
+        insertMember(db, member);
+    }
+}
+
 int main() {
-     vector<Member> members;
-   vector<Member> changedMembers;
-   
-    Member member1 = {
-        "001",
-        "John Doe",
-        "template1",
-        "ACTIVE",
-        "2024-12-31",
-        "2026-06-06 10:00:00",
-        
-    };
+    vector<Member> members;
+    vector<Member> changedMembers;
+
+    sqlite3* db;
+    if (sqlite3_open("members.db", &db) != SQLITE_OK) {
+        cout << "Failed to open database" << endl;
+        return 1;
+    }
+
+    const char* createTableSql =
+        "CREATE TABLE IF NOT EXISTS members ("
+        "member_id TEXT PRIMARY KEY, "
+        "member_name TEXT, "
+        "member_fingerprint_template TEXT, "
+        "member_status TEXT, "
+        "member_expiring_date TEXT, "
+        "last_updated TEXT"
+        ");";
+    sqlite3_exec(db, createTableSql, nullptr, nullptr, nullptr);
+
+    logError("Program started");
+
+    synchronizeMembers(db, members);
+
+    synchronizeMembers(db, changedMembers);
+
+    logError("Synchronization completed");
+
+    Member updatedMember = {
+    "001",
+    "John Doe",
+    "template1",
+    "INACTIVE",
+    "2024-12-31",
+    "2026-06-08 09:00:00"
+};
    
     Member member2 = {
         "002",
@@ -241,54 +300,30 @@ int main() {
         "2026-06-06 10:15:00",
         
     };
-    members.push_back(member1);
+   Member newMember = {
+    "005",
+    "New Member",
+    "template5",
+    "ACTIVE",
+    "2025-12-31",
+    "2026-06-08 08:00:00"
+};
+
+changedMembers.push_back(updatedMember);
+changedMembers.push_back(newMember);
 members.push_back(member2);
 members.push_back(member3);
 members.push_back(member4);
-    sqlite3* db;
-
-if (sqlite3_open("members.db", &db) != SQLITE_OK)
-{
-    cout << "Failed to open database" << endl;
-    return 1;
-}
-
-    const char* createTableSql =
-    "CREATE TABLE IF NOT EXISTS members ("
-    "member_id TEXT PRIMARY KEY, "
-    "member_name TEXT, "
-    "member_fingerprint_template TEXT, "
-    "member_status TEXT, "
-    "member_expiring_date TEXT, "
-    "last_updated TEXT"
-    ");";
-    sqlite3_exec(db, createTableSql, nullptr, nullptr, nullptr);
-
-   
-   for (const auto& member : members)
-{
-    if (memberExists(db, member.member_id))
-    {
-        cout << "Updating member: "
-             << member.member_id
-             << endl;
-
-        updateMember(db, member);
-    }
-    else
-    {
-        cout << "Inserting member: "
-             << member.member_id
-             << endl;
-
-        insertMember(db, member);
-    }
-}
 
     if (!validateDuplicateIds(members)) {
         cout << "Duplicate IDs found. Synchronization aborted." << endl;
         return 1;
     }
+    if (!validateDuplicateIds(changedMembers))
+{
+    cout << "Duplicate IDs found in changed members." << endl;
+    return 1;
+}
 
     int validCount = 0;
     int invalidCount = 0;
@@ -299,36 +334,19 @@ if (sqlite3_open("members.db", &db) != SQLITE_OK)
             invalidCount++;
         }
     }
+    cout << "Members size: "
+     << members.size()
+     << endl;
 
     cout << "Valid Members: " << validCount << endl;
     cout << "Invalid Members: " << invalidCount << endl;
  
 
-cout << "001 exists: "
-     << memberExists(db, "001")
-     << endl;
 
-cout << "999 exists: "
-     << memberExists(db, "999")
-     << endl;
 
-     Member updatedMember = {
-    "001",
-    "John Doe",
-    "template1",
-    "INACTIVE",
-    "2024-12-31",
-    "2026-06-07 09:00:00"
-};
-cout << "Update member1: "
-     << updateMember(db, updatedMember)
-     << endl;
-    logError("Program started");
-    for (const auto& member : members) {
-        if (!validateMember(member)) {
-            logError("Invalid member: " + member.member_id);
-        }
-    }
+  
+
+  
     logError("Synchronization completed. Valid Members: " + to_string(validCount) + ", Invalid Members: " + to_string(invalidCount));
 sqlite3_close(db);
     return 0;
