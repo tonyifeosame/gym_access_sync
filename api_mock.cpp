@@ -113,6 +113,21 @@ static std::vector<Member> parseMembersArray(const std::string& payload)
     return members;
 }
 
+static std::string parseJsonField(const std::string& payload, const std::string& field)
+{
+    std::string token = "\"" + field + "\":\"";
+    auto start = payload.find(token);
+    if (start == std::string::npos) {
+        return {};
+    }
+    start += token.size();
+    auto end = payload.find('"', start);
+    if (end == std::string::npos) {
+        return {};
+    }
+    return payload.substr(start, end - start);
+}
+
 static std::optional<Member> parseSingleMember(const std::string& payload)
 {
     auto objectStart = payload.find('{');
@@ -170,6 +185,63 @@ MockHttpResponse mockApiServer(const MockHttpRequest& request, const std::vector
         return {404, "{\"error\":\"Not found\"}"};
     }
 
+    if (request.method == "GET" && request.path.rfind("/api/access/", 0) == 0) {
+        std::string id = request.path.substr(std::string("/api/access/").size());
+        for (const auto& member : cloudMembers) {
+            if (member.member_id == id) {
+                bool access = member.member_status == "ACTIVE";
+                std::ostringstream body;
+                body << "{"
+                     << "\"member_id\":\"" << escapeJson(member.member_id) << "\",";
+                body << "\"status\":\"" << escapeJson(member.member_status) << "\",";
+                body << "\"access\":" << (access ? "true" : "false");
+                body << "}";
+                return {200, body.str()};
+            }
+        }
+        return {404, "{\"error\":\"Not found\"}"};
+    }
+
+    if (request.method == "POST" && request.path == "/api/enrollment/start") {
+        std::string memberId = parseJsonField(request.body, "member_id");
+        for (const auto& member : cloudMembers) {
+            if (member.member_id == memberId) {
+                return {200, "{\"success\":true,\"member_id\":\"" + escapeJson(memberId) + "\",\"status\":\"PENDING_ENROLLMENT\"}"};
+            }
+        }
+        return {404, "{\"success\":false,\"error\":\"Member not found\"}"};
+    }
+
+    if (request.method == "GET" && request.path == "/api/enrollment/pending") {
+        std::ostringstream body;
+        body << "{\"success\":true,\"pending\":[";
+        bool first = true;
+        for (const auto& member : cloudMembers) {
+            if (member.member_status == "PENDING_ENROLLMENT") {
+                if (!first) {
+                    body << ",";
+                }
+                body << "{\"member_id\":\"" << escapeJson(member.member_id) << "\",\"member_name\":\"" << escapeJson(member.member_name) << "\"}";
+                first = false;
+            }
+        }
+        body << "]}";
+        return {200, body.str()};
+    }
+
+    if (request.method == "POST" && request.path == "/api/enrollment/result") {
+        std::string memberId = parseJsonField(request.body, "member_id");
+        std::string fingerprint = parseJsonField(request.body, "fingerprint_template");
+        for (const auto& member : cloudMembers) {
+            if (member.member_id == memberId) {
+                std::ostringstream body;
+                body << "{\"success\":true,\"member_id\":\"" << escapeJson(memberId) << "\",\"status\":\"ACTIVE\"}";
+                return {200, body.str()};
+            }
+        }
+        return {404, "{\"success\":false,\"error\":\"Member not found\"}"};
+    }
+
     return {404, "{\"error\":\"Endpoint not found\"}"};
 }
 
@@ -201,4 +273,28 @@ std::optional<Member> mockApiClientGetMember(const std::string& member_id, const
         return std::nullopt;
     }
     return parseSingleMember(response.body);
+}
+
+std::optional<AccessInfo> mockApiClientGetAccess(const std::string& member_id, const std::vector<Member>& cloudMembers)
+{
+    MockHttpRequest request{"GET", "/api/access/" + member_id, "", "gym-secret-key"};
+    MockHttpResponse response = mockApiServer(request, cloudMembers);
+    if (response.status != 200) {
+        return std::nullopt;
+    }
+    AccessInfo info;
+    auto findValue = [&](const std::string& field) -> std::string {
+        std::string token = "\"" + field + "\":\"";
+        auto start = response.body.find(token);
+        if (start == std::string::npos) return {};
+        start += token.size();
+        auto end = response.body.find('"', start);
+        if (end == std::string::npos) return {};
+        return response.body.substr(start, end - start);
+    };
+
+    info.member_id = findValue("member_id");
+    info.status = findValue("status");
+    info.access = response.body.find("\"access\":true") != std::string::npos;
+    return info;
 }

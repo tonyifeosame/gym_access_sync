@@ -31,6 +31,11 @@ void logError(const std::string& message)
     }
 }
 
+bool recordLastSync(sqlite3* db)
+{
+    return updateLastSyncTime(db, getCurrentTimestamp());
+}
+
 static void processMember(sqlite3* db, const Member& member)
 {
     if (!validateMember(member)) {
