@@ -199,8 +199,9 @@ bool updateMember(sqlite3* db, const Member& member)
 }
 
 int main() {
-    
-    vector<Member> members;
+     vector<Member> members;
+   vector<Member> changedMembers;
+   
     Member member1 = {
         "001",
         "John Doe",
@@ -264,10 +265,25 @@ if (sqlite3_open("members.db", &db) != SQLITE_OK)
     sqlite3_exec(db, createTableSql, nullptr, nullptr, nullptr);
 
    
-   cout << "Insert member1: " << insertMember(db, member1) << endl;
-   cout << "Insert member2: " << insertMember(db, member2) << endl;
-   cout << "Insert member3: " << insertMember(db, member3) << endl;
-   cout << "Insert member4: " << insertMember(db, member4) << endl;
+   for (const auto& member : members)
+{
+    if (memberExists(db, member.member_id))
+    {
+        cout << "Updating member: "
+             << member.member_id
+             << endl;
+
+        updateMember(db, member);
+    }
+    else
+    {
+        cout << "Inserting member: "
+             << member.member_id
+             << endl;
+
+        insertMember(db, member);
+    }
+}
 
     if (!validateDuplicateIds(members)) {
         cout << "Duplicate IDs found. Synchronization aborted." << endl;
