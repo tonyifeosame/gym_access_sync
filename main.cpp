@@ -107,6 +107,37 @@ void logError(const string& message)
         logFile.close();
     }
 }
+bool memberExists(sqlite3* db, const string& member_id)
+{
+    sqlite3_stmt* stmt;
+
+    const char* sql =
+        "SELECT COUNT(*) FROM members WHERE member_id = ?";
+
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) != SQLITE_OK)
+    {
+        return false;
+    }
+
+    sqlite3_bind_text(
+        stmt,
+        1,
+        member_id.c_str(),
+        -1,
+        SQLITE_TRANSIENT
+    );
+
+    bool exists = false;
+
+    if (sqlite3_step(stmt) == SQLITE_ROW)
+    {
+        exists = sqlite3_column_int(stmt, 0) > 0;
+    }
+
+    sqlite3_finalize(stmt);
+
+    return exists;
+}
 
 bool insertMember(sqlite3* db, const Member& member)
 {
@@ -133,6 +164,37 @@ bool insertMember(sqlite3* db, const Member& member)
 
     bool success = (rc == SQLITE_DONE);
     sqlite3_finalize(stmt);
+    return success;
+}
+bool updateMember(sqlite3* db, const Member& member)
+{
+    const char* sql =
+        "UPDATE members SET "
+        "member_name = ?, "
+        "member_fingerprint_template = ?, "
+        "member_status = ?, "
+        "member_expiring_date = ?, "
+        "last_updated = ? "
+        "WHERE member_id = ?;";
+
+    sqlite3_stmt* stmt = nullptr;
+
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) != SQLITE_OK)
+    {
+        return false;
+    }
+
+    sqlite3_bind_text(stmt, 1, member.member_name.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 2, member.member_fingerprint_template.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 3, member.member_status.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 4, member.member_expiring_date.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 5, member.last_updated.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 6, member.member_id.c_str(), -1, SQLITE_TRANSIENT);
+
+    bool success = (sqlite3_step(stmt) == SQLITE_DONE);
+
+    sqlite3_finalize(stmt);
+
     return success;
 }
 
@@ -224,8 +286,27 @@ if (sqlite3_open("members.db", &db) != SQLITE_OK)
 
     cout << "Valid Members: " << validCount << endl;
     cout << "Invalid Members: " << invalidCount << endl;
+ 
 
+cout << "001 exists: "
+     << memberExists(db, "001")
+     << endl;
 
+cout << "999 exists: "
+     << memberExists(db, "999")
+     << endl;
+
+     Member updatedMember = {
+    "001",
+    "John Doe",
+    "template1",
+    "INACTIVE",
+    "2024-12-31",
+    "2026-06-07 09:00:00"
+};
+cout << "Update member1: "
+     << updateMember(db, updatedMember)
+     << endl;
     logError("Program started");
     for (const auto& member : members) {
         if (!validateMember(member)) {
