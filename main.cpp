@@ -2,6 +2,8 @@
 #include <vector>
 #include <string>
 #include <set>
+#include <fstream>
+#include <sqlite3.h>
 using namespace std;
 struct Member{
     string member_id;
@@ -9,7 +11,10 @@ struct Member{
     string member_fingerprint_template;
     string member_status;
     string member_expiring_date;
+    string last_updated;
+    
 };
+
 struct ValidationResult{
     bool is_valid;
     vector<string> errors;
@@ -92,65 +97,142 @@ bool validateMember(const Member& member)
            validateExpiringDate(member).is_valid &&
            validateMemberId(member).is_valid;
 }
+void logError(const string& message)
+{
+    ofstream logFile("sync.log", ios::app);
 
-int main(){
+    if (logFile.is_open())
+    {
+        logFile << message << endl;
+        logFile.close();
+    }
+}
+
+bool insertMember(sqlite3* db, const Member& member)
+{
+    const char* sql = "INSERT OR IGNORE INTO members (member_id, member_name, member_fingerprint_template, member_status, member_expiring_date, last_updated ) VALUES (?, ?, ?, ?, ?, ?);";
+    sqlite3_stmt* stmt = nullptr;
+
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) != SQLITE_OK) {
+        cout << sqlite3_errmsg(db) << endl;
+        return false;
+    }
+
+    sqlite3_bind_text(stmt, 1, member.member_id.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 2, member.member_name.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 3, member.member_fingerprint_template.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 4, member.member_status.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 5, member.member_expiring_date.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 6, member.last_updated.c_str(), -1, SQLITE_TRANSIENT);
+    
+
+    int rc = sqlite3_step(stmt);
+    if (rc != SQLITE_DONE) {
+        cout << "SQLite Error: " << sqlite3_errmsg(db) << endl;
+    }
+
+    bool success = (rc == SQLITE_DONE);
+    sqlite3_finalize(stmt);
+    return success;
+}
+
+int main() {
+    
     vector<Member> members;
     Member member1 = {
         "001",
         "John Doe",
         "template1",
         "ACTIVE",
-        "2024-12-31"
+        "2024-12-31",
+        "2026-06-06 10:00:00",
+        
     };
-    members.push_back(member1);
+   
     Member member2 = {
         "002",
         "Jane Smith",
         "template2",
         "INACTIVE",
-        "2023-06-30"
+        "2023-06-30",
+        "2026-06-06 10:05:00",
+        
     };
-    members.push_back(member2);
+    
     Member member3 = {
         "003",
         "Alice Johnson",
         "",
         "ACTIVE",
-        "2025-03-15"
+        "2025-03-15",
+        "2026-06-06 10:10:00",
+        
     };
-    members.push_back(member3);
+    
     Member member4 = {
         "004",
         "",
         "template4",
         "ACTIVE",
-        "2024-09-30"
+        "2024-09-30",
+        "2026-06-06 10:15:00",
+        
     };
-    members.push_back(member4);
-    
-    int validCount = 0;
-    if (!validateDuplicateIds(members))
+    members.push_back(member1);
+members.push_back(member2);
+members.push_back(member3);
+members.push_back(member4);
+    sqlite3* db;
+
+if (sqlite3_open("members.db", &db) != SQLITE_OK)
 {
-    cout << "Duplicate IDs found. Synchronization aborted." << endl;
+    cout << "Failed to open database" << endl;
     return 1;
 }
+
+    const char* createTableSql =
+    "CREATE TABLE IF NOT EXISTS members ("
+    "member_id TEXT PRIMARY KEY, "
+    "member_name TEXT, "
+    "member_fingerprint_template TEXT, "
+    "member_status TEXT, "
+    "member_expiring_date TEXT, "
+    "last_updated TEXT"
+    ");";
+    sqlite3_exec(db, createTableSql, nullptr, nullptr, nullptr);
+
+   
+   cout << "Insert member1: " << insertMember(db, member1) << endl;
+   cout << "Insert member2: " << insertMember(db, member2) << endl;
+   cout << "Insert member3: " << insertMember(db, member3) << endl;
+   cout << "Insert member4: " << insertMember(db, member4) << endl;
+
+    if (!validateDuplicateIds(members)) {
+        cout << "Duplicate IDs found. Synchronization aborted." << endl;
+        return 1;
+    }
+
+    int validCount = 0;
     int invalidCount = 0;
     for (const auto& member : members) {
-    if (validateMember(member)) {
+        if (validateMember(member)) {
             validCount++;
         } else {
             invalidCount++;
         }
     }
+
     cout << "Valid Members: " << validCount << endl;
     cout << "Invalid Members: " << invalidCount << endl;
-    set<string> ids;
+
+
+    logError("Program started");
     for (const auto& member : members) {
-        if (ids.find(member.member_id) != ids.end()) {
-            cout << "Duplicate ID found: " << member.member_id << endl;
-        } else {
-            ids.insert(member.member_id);
+        if (!validateMember(member)) {
+            logError("Invalid member: " + member.member_id);
         }
     }
+    logError("Synchronization completed. Valid Members: " + to_string(validCount) + ", Invalid Members: " + to_string(invalidCount));
+sqlite3_close(db);
     return 0;
 }
