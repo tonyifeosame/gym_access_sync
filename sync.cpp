@@ -56,25 +56,67 @@ void synchronizeMembers(sqlite3* db, const std::vector<Member>& members)
     }
 }
 
-void removeMissingMembers(sqlite3* db, const std::vector<Member>& cloudMembers)
+int removeMissingMembers(sqlite3* db, const std::vector<Member>& cloudMembers, bool dryRun)
 {
     std::set<std::string> cloudIds;
     for (const auto& m : cloudMembers) {
         cloudIds.insert(m.member_id);
     }
 
-    for (const auto& localId : getAllMemberIds(db)) {
+    std::vector<std::string> localIds = getAllMemberIds(db);
+    int candidates = 0;
+    int deleted = 0;
+
+    char* errmsg = nullptr;
+    if (!dryRun) {
+        if (sqlite3_exec(db, "BEGIN TRANSACTION;", nullptr, nullptr, &errmsg) != SQLITE_OK) {
+            std::string em = errmsg ? errmsg : "unknown";
+            sqlite3_free(errmsg);
+            logError("Failed to begin transaction: " + em);
+            return -1;
+        }
+    }
+
+    for (const auto& localId : localIds) {
         if (cloudIds.find(localId) == cloudIds.end()) {
-            if (deleteMember(db, localId)) {
-                logError("Deleted member: " + localId);
+            candidates++;
+            if (dryRun) {
+                logError("Dry-run delete candidate: " + localId);
+            } else {
+                if (deleteMember(db, localId)) {
+                    deleted++;
+                    logError("Deleted member: " + localId);
+                } else {
+                    logError("Failed to delete member: " + localId);
+                    sqlite3_exec(db, "ROLLBACK;", nullptr, nullptr, nullptr);
+                    return -1;
+                }
             }
         }
     }
+
+    if (!dryRun) {
+        if (sqlite3_exec(db, "COMMIT;", nullptr, nullptr, &errmsg) != SQLITE_OK) {
+            std::string em = errmsg ? errmsg : "unknown";
+            sqlite3_free(errmsg);
+            sqlite3_exec(db, "ROLLBACK;", nullptr, nullptr, nullptr);
+            logError("Failed to commit transaction: " + em);
+            return -1;
+        }
+        if (errmsg) sqlite3_free(errmsg);
+    }
+
+    return dryRun ? candidates : deleted;
 }
 
 void synchronizeDeletedMembers(sqlite3* db, const std::vector<Member>& sourceMembers, bool hardDelete)
 {
     if (hardDelete) {
-        removeMissingMembers(db, sourceMembers);
+        int res = removeMissingMembers(db, sourceMembers, false);
+        if (res >= 0) {
+            logError(std::string("removeMissingMembers deleted count: ") + std::to_string(res));
+        } else {
+            logError("removeMissingMembers encountered an error");
+        }
     }
 }
