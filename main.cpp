@@ -3,6 +3,9 @@
 #include <string>
 #include <set>
 #include <fstream>
+#include <sstream>
+#include <iomanip>
+#include <chrono>
 #include <sqlite3.h>
 using namespace std;
 struct Member{
@@ -97,13 +100,29 @@ bool validateMember(const Member& member)
            validateExpiringDate(member).is_valid &&
            validateMemberId(member).is_valid;
 }
+
+string getCurrentTimestamp()
+{
+    auto now = chrono::system_clock::now();
+    time_t tt = chrono::system_clock::to_time_t(now);
+    tm local_tm;
+#if defined(_WIN32) || defined(_WIN64)
+    localtime_s(&local_tm, &tt);
+#else
+    localtime_r(&tt, &local_tm);
+#endif
+    ostringstream oss;
+    oss << put_time(&local_tm, "%Y-%m-%d %H:%M:%S");
+    return oss.str();
+}
+
 void logError(const string& message)
 {
     ofstream logFile("sync.log", ios::app);
 
     if (logFile.is_open())
     {
-        logFile << message << endl;
+        logFile << getCurrentTimestamp() << " - " << message << endl;
         logFile.close();
     }
 }
@@ -210,6 +229,7 @@ void synchronizeMembers(
         processMember(db, member);
     }
 }
+
 void processMember(
     sqlite3* db,
     const Member& member
@@ -232,6 +252,7 @@ void processMember(
         insertMember(db, member);
     }
 }
+
 
 int main() {
     vector<Member> members;
@@ -260,7 +281,7 @@ int main() {
 
     synchronizeMembers(db, changedMembers);
 
-    logError("Synchronization completed");
+   
 
     Member updatedMember = {
     "001",
@@ -340,13 +361,11 @@ members.push_back(member4);
 
     cout << "Valid Members: " << validCount << endl;
     cout << "Invalid Members: " << invalidCount << endl;
- 
+    cout << "Starting synchronization..." << endl;
 
+    synchronizeMembers(db, members);
+    synchronizeMembers(db, changedMembers);
 
-
-  
-
-  
     logError("Synchronization completed. Valid Members: " + to_string(validCount) + ", Invalid Members: " + to_string(invalidCount));
 sqlite3_close(db);
     return 0;
