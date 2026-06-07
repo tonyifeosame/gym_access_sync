@@ -1,9 +1,33 @@
 #include <iostream>
 #include <vector>
+#include <optional>
 #include "member.h"
 #include "validation.h"
 #include "database.h"
 #include "sync.h"
+
+bool hasAccess(const Member& member)
+{
+    return member.member_status == "ACTIVE";
+}
+
+void simulateScan(sqlite3* db, const std::string& member_id)
+{
+    std::cout << "Simulating scan for member " << member_id << std::endl;
+    auto memberOpt = getMemberById(db, member_id);
+    if (!memberOpt) {
+        std::cout << "Member not found: " << member_id << std::endl;
+        return;
+    }
+
+    if (hasAccess(*memberOpt)) {
+        std::cout << "Access Granted" << std::endl;
+        logError("Access Granted: " + member_id);
+    } else {
+        std::cout << "Access Denied" << std::endl;
+        logError("Access Denied: " + member_id);
+    }
+}
 
 int main()
 {
@@ -65,6 +89,11 @@ int main()
     synchronizeDeletedMembers(db, sourceMembers);
     
     std::cout << "Synchronization completed." << std::endl;
+
+    simulateScan(db, "001");
+    simulateScan(db, "002");
+    simulateScan(db, "005");
+
     closeDatabase(db);
     return 0;
 }

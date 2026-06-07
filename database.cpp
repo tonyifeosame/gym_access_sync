@@ -85,6 +85,87 @@ bool deleteMember(sqlite3* db, const std::string& member_id)
     return success;
 }
 
+bool markMemberInactive(sqlite3* db, const std::string& member_id, const std::string& last_updated)
+{
+    const char* sql = "UPDATE members SET member_status = 'INACTIVE', last_updated = ? WHERE member_id = ?;";
+    sqlite3_stmt* stmt = nullptr;
+
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) != SQLITE_OK) {
+        return false;
+    }
+
+    sqlite3_bind_text(stmt, 1, last_updated.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 2, member_id.c_str(), -1, SQLITE_TRANSIENT);
+    bool success = sqlite3_step(stmt) == SQLITE_DONE;
+    sqlite3_finalize(stmt);
+    return success;
+}
+
+std::vector<Member> getAllMembers(sqlite3* db)
+{
+    const char* sql = "SELECT member_id, member_name, member_fingerprint_template, member_status, member_expiring_date, last_updated FROM members;";
+    sqlite3_stmt* stmt = nullptr;
+    std::vector<Member> members;
+
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) != SQLITE_OK) {
+        return members;
+    }
+
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+        Member member;
+        const unsigned char* idText = sqlite3_column_text(stmt, 0);
+        const unsigned char* nameText = sqlite3_column_text(stmt, 1);
+        const unsigned char* templateText = sqlite3_column_text(stmt, 2);
+        const unsigned char* statusText = sqlite3_column_text(stmt, 3);
+        const unsigned char* expiringText = sqlite3_column_text(stmt, 4);
+        const unsigned char* updatedText = sqlite3_column_text(stmt, 5);
+
+        member.member_id = idText ? reinterpret_cast<const char*>(idText) : "";
+        member.member_name = nameText ? reinterpret_cast<const char*>(nameText) : "";
+        member.member_fingerprint_template = templateText ? reinterpret_cast<const char*>(templateText) : "";
+        member.member_status = statusText ? reinterpret_cast<const char*>(statusText) : "";
+        member.member_expiring_date = expiringText ? reinterpret_cast<const char*>(expiringText) : "";
+        member.last_updated = updatedText ? reinterpret_cast<const char*>(updatedText) : "";
+        members.push_back(member);
+    }
+
+    sqlite3_finalize(stmt);
+    return members;
+}
+
+std::vector<Member> getMembersChangedSince(sqlite3* db, const std::string& since)
+{
+    const char* sql = "SELECT member_id, member_name, member_fingerprint_template, member_status, member_expiring_date, last_updated FROM members WHERE last_updated > ?;";
+    sqlite3_stmt* stmt = nullptr;
+    std::vector<Member> members;
+
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) != SQLITE_OK) {
+        return members;
+    }
+
+    sqlite3_bind_text(stmt, 1, since.c_str(), -1, SQLITE_TRANSIENT);
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+        Member member;
+        const unsigned char* idText = sqlite3_column_text(stmt, 0);
+        const unsigned char* nameText = sqlite3_column_text(stmt, 1);
+        const unsigned char* templateText = sqlite3_column_text(stmt, 2);
+        const unsigned char* statusText = sqlite3_column_text(stmt, 3);
+        const unsigned char* expiringText = sqlite3_column_text(stmt, 4);
+        const unsigned char* updatedText = sqlite3_column_text(stmt, 5);
+
+        member.member_id = idText ? reinterpret_cast<const char*>(idText) : "";
+        member.member_name = nameText ? reinterpret_cast<const char*>(nameText) : "";
+        member.member_fingerprint_template = templateText ? reinterpret_cast<const char*>(templateText) : "";
+        member.member_status = statusText ? reinterpret_cast<const char*>(statusText) : "";
+        member.member_expiring_date = expiringText ? reinterpret_cast<const char*>(expiringText) : "";
+        member.last_updated = updatedText ? reinterpret_cast<const char*>(updatedText) : "";
+        members.push_back(member);
+    }
+
+    sqlite3_finalize(stmt);
+    return members;
+}
+
 std::vector<std::string> getAllMemberIds(sqlite3* db)
 {
     const char* sql = "SELECT member_id FROM members;";
@@ -123,6 +204,40 @@ bool memberExists(sqlite3* db, const std::string& member_id)
 
     sqlite3_finalize(stmt);
     return exists;
+}
+
+std::optional<Member> getMemberById(sqlite3* db, const std::string& member_id)
+{
+    const char* sql = "SELECT member_id, member_name, member_fingerprint_template, member_status, member_expiring_date, last_updated FROM members WHERE member_id = ?;";
+    sqlite3_stmt* stmt = nullptr;
+
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) != SQLITE_OK) {
+        return std::nullopt;
+    }
+
+    sqlite3_bind_text(stmt, 1, member_id.c_str(), -1, SQLITE_TRANSIENT);
+
+    std::optional<Member> result;
+    if (sqlite3_step(stmt) == SQLITE_ROW) {
+        Member member;
+        const unsigned char* idText = sqlite3_column_text(stmt, 0);
+        const unsigned char* nameText = sqlite3_column_text(stmt, 1);
+        const unsigned char* templateText = sqlite3_column_text(stmt, 2);
+        const unsigned char* statusText = sqlite3_column_text(stmt, 3);
+        const unsigned char* expiringText = sqlite3_column_text(stmt, 4);
+        const unsigned char* updatedText = sqlite3_column_text(stmt, 5);
+
+        member.member_id = idText ? reinterpret_cast<const char*>(idText) : "";
+        member.member_name = nameText ? reinterpret_cast<const char*>(nameText) : "";
+        member.member_fingerprint_template = templateText ? reinterpret_cast<const char*>(templateText) : "";
+        member.member_status = statusText ? reinterpret_cast<const char*>(statusText) : "";
+        member.member_expiring_date = expiringText ? reinterpret_cast<const char*>(expiringText) : "";
+        member.last_updated = updatedText ? reinterpret_cast<const char*>(updatedText) : "";
+        result = member;
+    }
+
+    sqlite3_finalize(stmt);
+    return result;
 }
 
 void closeDatabase(sqlite3* db)

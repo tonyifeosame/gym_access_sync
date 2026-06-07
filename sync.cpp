@@ -23,7 +23,7 @@ static std::string getCurrentTimestamp()
     return oss.str();
 }
 
-static void logError(const std::string& message)
+void logError(const std::string& message)
 {
     std::ofstream logFile("sync.log", std::ios::app);
     if (logFile.is_open()) {
@@ -56,7 +56,7 @@ void synchronizeMembers(sqlite3* db, const std::vector<Member>& members)
     }
 }
 
-int removeMissingMembers(sqlite3* db, const std::vector<Member>& cloudMembers, bool dryRun)
+int removeMissingMembers(sqlite3* db, const std::vector<Member>& cloudMembers, bool dryRun, bool useSoftDelete)
 {
     std::set<std::string> cloudIds;
     for (const auto& m : cloudMembers) {
@@ -83,11 +83,19 @@ int removeMissingMembers(sqlite3* db, const std::vector<Member>& cloudMembers, b
             if (dryRun) {
                 logError("Dry-run delete candidate: " + localId);
             } else {
-                if (deleteMember(db, localId)) {
+                bool success = useSoftDelete
+                    ? markMemberInactive(db, localId, getCurrentTimestamp())
+                    : deleteMember(db, localId);
+
+                if (success) {
                     deleted++;
-                    logError("Deleted member: " + localId);
+                    if (useSoftDelete) {
+                        logError("Inactivated member: " + localId);
+                    } else {
+                        logError("Deleted member: " + localId);
+                    }
                 } else {
-                    logError("Failed to delete member: " + localId);
+                    logError("Failed to " + std::string(useSoftDelete ? "inactivate" : "delete") + " member: " + localId);
                     sqlite3_exec(db, "ROLLBACK;", nullptr, nullptr, nullptr);
                     return -1;
                 }
@@ -111,12 +119,10 @@ int removeMissingMembers(sqlite3* db, const std::vector<Member>& cloudMembers, b
 
 void synchronizeDeletedMembers(sqlite3* db, const std::vector<Member>& sourceMembers, bool hardDelete)
 {
-    if (hardDelete) {
-        int res = removeMissingMembers(db, sourceMembers, false);
-        if (res >= 0) {
-            logError(std::string("removeMissingMembers deleted count: ") + std::to_string(res));
-        } else {
-            logError("removeMissingMembers encountered an error");
-        }
+    int res = removeMissingMembers(db, sourceMembers, false, !hardDelete);
+    if (res >= 0) {
+        logError(std::string("removeMissingMembers affected count: ") + std::to_string(res));
+    } else {
+        logError("removeMissingMembers encountered an error");
     }
 }
