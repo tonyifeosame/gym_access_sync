@@ -365,6 +365,7 @@ members.push_back(member4);
 
     synchronizeMembers(db, members);
     synchronizeMembers(db, changedMembers);
+ 
 
     logError("Synchronization completed. Valid Members: " + to_string(validCount) + ", Invalid Members: " + to_string(invalidCount));
 sqlite3_close(db);
