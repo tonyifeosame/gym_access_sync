@@ -415,11 +415,15 @@ static std::optional<Member> parseMemberObject(const std::string& object)
     if (member.member_id.empty()) {
         return std::nullopt;
     }
-    member.member_name = extractJsonString(object, "member_name");
-    member.member_fingerprint_template = extractJsonString(object, "member_fingerprint_template");
-    member.member_status = extractJsonString(object, "member_status");
-    member.member_expiring_date = extractJsonString(object, "member_expiring_date");
-    member.last_updated = extractJsonString(object, "last_updated");
+    member.member_name = extractJsonString(object, "full_name");
+    member.member_fingerprint_template = extractJsonString(object, "fingerprint_template");
+    
+    // Map Go API's 'active' boolean to 'member_status' string
+    bool active = extractJsonBoolField(object, "active", false);
+    member.member_status = active ? "ACTIVE" : "INACTIVE";
+    
+    member.member_expiring_date = extractJsonString(object, "membership_type");
+    member.last_updated = extractJsonString(object, "updated_at");
     return member;
 }
 
@@ -428,7 +432,7 @@ static std::vector<Member> parseMembersArray(const std::string& payload)
     std::vector<Member> members;
     size_t pos = 0;
     while (true) {
-        pos = payload.find("{\"member_id\"", pos);
+        pos = payload.find("\"member_id\"", pos);
         if (pos == std::string::npos) {
             break;
         }
@@ -451,7 +455,7 @@ std::vector<Member> ApiClient::fetchAllMembers(sqlite3* localDb)
     if (!url.empty() && url.back() == '/') {
         url.pop_back();
     }
-    url += "/members";
+    url += "/api/v1/members";
 
     auto response = httpGet(url, config_);
     if (response && response->statusCode == 200) {
@@ -471,7 +475,7 @@ std::vector<Member> ApiClient::fetchChangedMembers(const std::string& lastSyncTi
     if (!url.empty() && url.back() == '/') {
         url.pop_back();
     }
-    url += "/members/changes?since=" + lastSyncTime;
+    url += "/api/v1/members/changes?since=" + lastSyncTime;
 
     auto response = httpGet(url, config_);
     if (response && response->statusCode == 200) {
@@ -491,7 +495,7 @@ std::optional<Member> ApiClient::fetchMember(const std::string& member_id)
     if (!url.empty() && url.back() == '/') {
         url.pop_back();
     }
-    url += "/members/" + member_id;
+    url += "/api/v1/members/" + member_id;
 
     auto response = httpGet(url, config_);
     if (response && response->statusCode == 200) {
@@ -586,7 +590,7 @@ std::optional<AccessResult> ApiClient::fetchAccess(const std::string& member_id,
     if (!url.empty() && url.back() == '/') {
         url.pop_back();
     }
-    url += "/access/" + member_id;
+    url += "/api/v1/access/" + member_id;
 
     auto response = httpGet(url, config_);
     if (!response) {
@@ -627,13 +631,13 @@ bool ApiClient::startEnrollment(const std::string& member_id, sqlite3* localDb)
     if (!url.empty() && url.back() == '/') {
         url.pop_back();
     }
-    url += "/enrollment/start";
+    url += "/api/v1/enrollment/start";
 
     std::ostringstream payload;
     payload << "{\"member_id\":\"" << member_id << "\"}";
 
     auto response = httpPost(url, config_, payload.str());
-    if (response && response->statusCode == 200) {
+    if (response && (response->statusCode == 200 || response->statusCode == 201)) {
         return true;
     }
 
@@ -655,7 +659,7 @@ std::vector<std::string> ApiClient::fetchPendingEnrollments(sqlite3* localDb)
     if (!url.empty() && url.back() == '/') {
         url.pop_back();
     }
-    url += "/enrollment/pending";
+    url += "/api/v1/enrollment/pending";
 
     auto response = httpGet(url, config_);
     if (response && response->statusCode == 200) {
@@ -680,7 +684,7 @@ bool ApiClient::submitEnrollmentResult(const std::string& member_id, const std::
     if (!url.empty() && url.back() == '/') {
         url.pop_back();
     }
-    url += "/enrollment/result";
+    url += "/api/v1/enrollment/result";
 
     std::ostringstream payload;
     payload << "{\"member_id\":\"" << member_id << "\",";

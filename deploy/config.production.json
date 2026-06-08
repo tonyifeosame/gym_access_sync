@@ -1,0 +1,10 @@
+{
+  "api_url": "https://api.yourdomain.com",
+  "api_key": "CHANGE_THIS_KEY",
+  "sync_interval_seconds": 60,
+  "site_name": "Main Gym",
+  "offline_mode": true,
+  "scanner_ip": "192.168.1.100",
+  "scanner_port": 4370,
+  "enrollment_timeout": 30
+}
