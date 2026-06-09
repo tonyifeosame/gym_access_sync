@@ -1,0 +1,7 @@
+# Build artifacts
+gym_server
+*.o
+*.out
+
+# Local SQLite databases
+*.db
