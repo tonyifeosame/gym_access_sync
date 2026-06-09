@@ -1,0 +1,85 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Device Status &middot; Gym Access Portal</title>
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet" />
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css" rel="stylesheet" />
+  <link href="css/style.css" rel="stylesheet" />
+</head>
+<body>
+  <aside class="sidebar" id="sidebar"></aside>
+  <div class="main">
+    <div class="topbar" id="topbar"></div>
+    <div class="content">
+      <div class="row g-3">
+        <div class="col-md-6">
+          <div class="card h-100">
+            <div class="card-body d-flex align-items-center gap-3">
+              <div class="stat-icon" style="background:#0d6efd"><i class="bi bi-cloud-fill"></i></div>
+              <div class="flex-grow-1">
+                <div class="stat-label">Cloud API Server</div>
+                <div class="h5 mb-0" id="apiStatus">
+                  <span class="spinner-border spinner-border-sm"></span> Checking...
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div class="col-md-6">
+          <div class="card h-100">
+            <div class="card-body d-flex align-items-center gap-3">
+              <div class="stat-icon" style="background:#6c757d"><i class="bi bi-fingerprint"></i></div>
+              <div class="flex-grow-1">
+                <div class="stat-label">F22 Fingerprint Terminal</div>
+                <div class="h5 mb-0"><span class="badge text-bg-secondary">Unknown</span></div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="card mt-3">
+        <div class="card-header bg-white fw-semibold">
+          <i class="bi bi-info-circle"></i> About device status
+        </div>
+        <div class="card-body">
+          <p>
+            The cloud API server status above is checked live by pinging the
+            <code>GET /stats</code> endpoint.
+          </p>
+          <p class="mb-1">
+            <strong>F22 terminal status is not yet available.</strong> The backend
+            currently has no heartbeat / device-status endpoint, so the portal cannot
+            report whether the fingerprint terminal is online.
+          </p>
+          <p class="text-muted small mb-0">
+            To enable this, add a device heartbeat to the C++ server (e.g. the terminal
+            periodically calls <code>POST /device/heartbeat</code>, and the portal reads
+            <code>GET /device/status</code>). Let your developer know and this card will
+            light up automatically.
+          </p>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+  <script src="js/api.js"></script>
+  <script src="js/layout.js"></script>
+  <script>
+    (() => {
+      if (!Layout.init("device", "Device Status")) return;
+      const el = document.getElementById("apiStatus");
+      API.getStats()
+        .then(() => {
+          el.innerHTML = '<span class="badge text-bg-success">Online</span>';
+        })
+        .catch(() => {
+          el.innerHTML = '<span class="badge text-bg-danger">Offline</span>';
+        });
+    })();
+  </script>
+</body>
+</html>

@@ -230,6 +230,9 @@ static void sendResponse(SocketType client, int statusCode, const std::string& b
     oss << "\r\n";
     oss << "Content-Type: " << contentType << "\r\n";
     oss << "Content-Length: " << body.size() << "\r\n";
+    oss << "Access-Control-Allow-Origin: *\r\n";
+    oss << "Access-Control-Allow-Methods: GET, POST, PUT, DELETE, OPTIONS\r\n";
+    oss << "Access-Control-Allow-Headers: Content-Type, X-API-Key\r\n";
     oss << "Connection: close\r\n";
     oss << "\r\n";
     oss << body;
@@ -256,8 +259,13 @@ static std::string handleMemberCollection(sqlite3* db, const HttpRequest& reques
 
     if (request.method == "POST") {
         Member member;
-        if (!parseMemberFromBody(request.body, member) || member.member_id.empty()) {
-            return jsonError("Invalid member payload");
+        parseMemberFromBody(request.body, member);
+        member.member_id = parseJsonField(request.body, "member_id");
+        if (member.member_id.empty() || member.member_name.empty()) {
+            return jsonError("member_id and member_name are required");
+        }
+        if (member.member_status.empty()) {
+            member.member_status = "PENDING_ENROLLMENT";
         }
 
         if (memberExists(db, member.member_id)) {
@@ -397,6 +405,7 @@ static std::string handleAccessCheck(sqlite3* db, const std::string& memberId)
     }
 
     bool granted = member->member_status == "ACTIVE";
+    logAccessAttempt(db, memberId, granted, granted ? "Access Granted" : "Access Denied", getCurrentTimestamp(), "access-check");
     std::ostringstream oss;
     oss << "{"
         << "\"success\":true,"
@@ -405,6 +414,123 @@ static std::string handleAccessCheck(sqlite3* db, const std::string& memberId)
     oss << "\"granted\":" << (granted ? "true" : "false") << ",";
     oss << "\"message\":\"" << jsonEscape(granted ? "Access Granted" : "Access Denied") << "\"";
     oss << "}";
+    return oss.str();
+}
+
+static std::string accessLogToJson(const AccessLog& log)
+{
+    std::ostringstream oss;
+    oss << "{"
+        << "\"id\":" << log.id << ","
+        << "\"member_id\":\"" << jsonEscape(log.member_id) << "\",";
+    oss << "\"granted\":" << (log.granted ? "true" : "false") << ",";
+    oss << "\"reason\":\"" << jsonEscape(log.reason) << "\",";
+    oss << "\"timestamp\":\"" << jsonEscape(log.timestamp) << "\",";
+    oss << "\"source\":\"" << jsonEscape(log.source) << "\"";
+    oss << "}";
+    return oss.str();
+}
+
+static std::string accessLogsToJson(const std::vector<AccessLog>& logs)
+{
+    std::ostringstream oss;
+    oss << "{\"success\":true,\"logs\":[";
+    for (size_t i = 0; i < logs.size(); ++i) {
+        if (i > 0) {
+            oss << ",";
+        }
+        oss << accessLogToJson(logs[i]);
+    }
+    oss << "]}";
+    return oss.str();
+}
+
+static std::string getQueryParam(const std::string& query, const std::string& key)
+{
+    std::istringstream stream(query);
+    std::string pair;
+    while (std::getline(stream, pair, '&')) {
+        auto eq = pair.find('=');
+        if (eq == std::string::npos) {
+            continue;
+        }
+        if (pair.substr(0, eq) == key) {
+            return urlDecode(pair.substr(eq + 1));
+        }
+    }
+    return {};
+}
+
+static std::string handleAccessLogs(sqlite3* db, const HttpRequest& request)
+{
+    std::string date = getQueryParam(request.query, "date");
+    auto logs = date.empty() ? getAccessLogs(db) : getLogsByDate(db, date);
+    return accessLogsToJson(logs);
+}
+
+static std::string handleAccessLogsByMember(sqlite3* db, const std::string& memberId)
+{
+    auto logs = getLogsByMember(db, memberId);
+    return accessLogsToJson(logs);
+}
+
+static std::string handleAccessLogPost(sqlite3* db, const std::string& body)
+{
+    std::string memberId = parseJsonField(body, "member_id");
+    if (memberId.empty()) {
+        return jsonError("member_id is required");
+    }
+    std::string grantedStr = toLower(parseJsonField(body, "granted"));
+    bool granted = grantedStr == "true" || grantedStr == "1";
+    std::string reason = parseJsonField(body, "reason");
+    std::string source = parseJsonField(body, "source");
+    if (source.empty()) {
+        source = "admin-portal";
+    }
+    std::string timestamp = parseJsonField(body, "timestamp");
+    if (timestamp.empty()) {
+        timestamp = getCurrentTimestamp();
+    }
+
+    if (!logAccessAttempt(db, memberId, granted, reason, timestamp, source)) {
+        return jsonError("Failed to log access attempt");
+    }
+    return "{\"success\":true}";
+}
+
+static std::string handleStats(sqlite3* db)
+{
+    auto members = getAllMembers(db);
+    size_t total = members.size();
+    size_t active = 0;
+    size_t inactive = 0;
+    size_t pending = 0;
+    for (const auto& m : members) {
+        if (m.member_status == "ACTIVE") {
+            ++active;
+        } else if (m.member_status == "PENDING_ENROLLMENT") {
+            ++pending;
+        } else {
+            ++inactive;
+        }
+    }
+
+    std::string today = getCurrentTimestamp().substr(0, 10);
+    size_t todayEntries = 0;
+    for (const auto& log : getLogsByDate(db, today)) {
+        if (log.granted) {
+            ++todayEntries;
+        }
+    }
+
+    std::ostringstream oss;
+    oss << "{\"success\":true,\"stats\":{"
+        << "\"total_members\":" << total << ","
+        << "\"active_members\":" << active << ","
+        << "\"inactive_members\":" << inactive << ","
+        << "\"pending_enrollments\":" << pending << ","
+        << "\"today_entries\":" << todayEntries
+        << "}}";
     return oss.str();
 }
 
@@ -459,7 +585,10 @@ static void handleConnection(SocketType client, sqlite3* db)
     int statusCode = 200;
 
     auto apiKeyIt = request.headers.find("x-api-key");
-    if (apiKeyIt == request.headers.end() || apiKeyIt->second != "gym-secret-key") {
+    if (request.method == "OPTIONS") {
+        statusCode = 204;
+        responseBody = "";
+    } else if (apiKeyIt == request.headers.end() || apiKeyIt->second != "gym-secret-key") {
         statusCode = 401;
         responseBody = jsonError("Unauthorized");
     } else if (request.method == "GET" && path == "/members") {
@@ -473,12 +602,24 @@ static void handleConnection(SocketType client, sqlite3* db)
         } else {
             statusCode = 201;
         }
+    } else if (request.method == "GET" && path == "/stats") {
+        responseBody = handleStats(db);
     } else if (request.method == "GET" && path == "/enrollment/pending") {
         responseBody = handleEnrollmentPending(db);
     } else if (request.method == "POST" && path == "/enrollment/start") {
         responseBody = handleEnrollmentStart(db, request.body);
     } else if (request.method == "POST" && path == "/enrollment/result") {
         responseBody = handleEnrollmentResult(db, request.body);
+    } else if (request.method == "GET" && path == "/access/logs") {
+        responseBody = handleAccessLogs(db, request);
+    } else if (request.method == "GET" && path.rfind("/access/logs/", 0) == 0) {
+        std::string memberId = urlDecode(path.substr(std::string("/access/logs/").size()));
+        responseBody = handleAccessLogsByMember(db, memberId);
+    } else if (request.method == "POST" && path == "/access/log") {
+        responseBody = handleAccessLogPost(db, request.body);
+        if (responseBody.find("\"success\":false") != std::string::npos) {
+            statusCode = 400;
+        }
     } else if (request.method == "GET" && path.rfind("/access/", 0) == 0) {
         std::string memberId = urlDecode(path.substr(std::string("/access/").size()));
         responseBody = handleAccessCheck(db, memberId);
@@ -521,7 +662,7 @@ int main()
         return 1;
     }
 
-    if (!createMembersTable(db) || !createSyncStatusTable(db) || !initializeSyncStatus(db)) {
+    if (!createMembersTable(db) || !createSyncStatusTable(db) || !initializeSyncStatus(db) || !createAccessLogsTable(db)) {
         std::cerr << "Failed to initialize database schema" << std::endl;
         closeDatabase(db);
         return 1;
@@ -572,7 +713,7 @@ int main()
     }
 
     std::cout << "Crow-style REST server running on http://localhost:8080" << std::endl;
-    std::cout << "Endpoints: GET /members, GET /members/{id}, POST /members, PUT /members/{id}, DELETE /members/{id}, GET /access/{member_id}, GET /enrollment/pending, POST /enrollment/start, POST /enrollment/result" << std::endl;
+    std::cout << "Endpoints: GET /members, GET /members/{id}, POST /members, PUT /members/{id}, DELETE /members/{id}, GET /stats, GET /access/{member_id}, GET /access/logs, GET /access/logs/{member_id}, POST /access/log, GET /enrollment/pending, POST /enrollment/start, POST /enrollment/result" << std::endl;
 
     while (true) {
         sockaddr_in clientAddress;
