@@ -1,7 +1,11 @@
+// REST server implementation (RestServer class). Linked by main.cpp and gym_server_main.cpp.
+#include "rest_server.h"
+#include "api_paths.h"
 #include "database.h"
 #include "member.h"
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cctype>
 #include <cstring>
@@ -374,7 +378,10 @@ static std::string handleEnrollmentPending(sqlite3* db)
 static std::string handleEnrollmentResult(sqlite3* db, const std::string& body)
 {
     std::string memberId = parseJsonField(body, "member_id");
-    std::string fingerprint = parseJsonField(body, "fingerprint_template");
+    std::string fingerprint = parseJsonField(body, "member_fingerprint_template");
+    if (fingerprint.empty()) {
+        fingerprint = parseJsonField(body, "fingerprint_template");
+    }
     if (memberId.empty() || fingerprint.empty()) {
         return jsonError("Invalid enrollment result payload");
     }
@@ -405,7 +412,6 @@ static std::string handleAccessCheck(sqlite3* db, const std::string& memberId)
     }
 
     bool granted = member->member_status == "ACTIVE";
-    logAccessAttempt(db, memberId, granted, granted ? "Access Granted" : "Access Denied", getCurrentTimestamp(), "access-check");
     std::ostringstream oss;
     oss << "{"
         << "\"success\":true,"
@@ -491,11 +497,32 @@ static std::string handleAccessLogPost(sqlite3* db, const std::string& body)
     if (timestamp.empty()) {
         timestamp = getCurrentTimestamp();
     }
+    std::string idempotencyKey = parseJsonField(body, "idempotency_key");
 
-    if (!logAccessAttempt(db, memberId, granted, reason, timestamp, source)) {
+    if (!logAccessAttempt(db, memberId, granted, reason, timestamp, source, idempotencyKey)) {
         return jsonError("Failed to log access attempt");
     }
     return "{\"success\":true}";
+}
+
+static std::string handleMemberChanges(sqlite3* db, const std::string& query)
+{
+    std::string since = getQueryParam(query, "since");
+    if (since.empty()) {
+        since = "1970-01-01 00:00:00";
+    }
+
+    auto members = getMembersChangedSince(db, since);
+    std::ostringstream oss;
+    oss << "{\"success\":true,\"members\":[";
+    for (size_t i = 0; i < members.size(); ++i) {
+        if (i > 0) {
+            oss << ",";
+        }
+        oss << memberToJson(members[i]);
+    }
+    oss << "]}";
+    return oss.str();
 }
 
 static std::string handleStats(sqlite3* db)
@@ -534,8 +561,23 @@ static std::string handleStats(sqlite3* db)
     return oss.str();
 }
 
-static void handleConnection(SocketType client, sqlite3* db)
+struct ConnectionContext {
+    std::string db_path;
+    std::string api_key;
+};
+
+static void handleConnection(SocketType client, ConnectionContext context)
 {
+    sqlite3* db = nullptr;
+    if (!openDatabase(db, context.db_path)) {
+#ifdef _WIN32
+        closesocket(client);
+#else
+        close(client);
+#endif
+        return;
+    }
+
     constexpr size_t bufferSize = 8192;
     std::string requestData;
     requestData.reserve(bufferSize);
@@ -543,6 +585,7 @@ static void handleConnection(SocketType client, sqlite3* db)
 
     int received = static_cast<int>(recv(client, buffer, bufferSize, 0));
     if (received <= 0) {
+        closeDatabase(db);
 #ifdef _WIN32
         closesocket(client);
 #else
@@ -554,6 +597,7 @@ static void handleConnection(SocketType client, sqlite3* db)
 
     auto headerEnd = requestData.find("\r\n\r\n");
     if (headerEnd == std::string::npos) {
+        closeDatabase(db);
 #ifdef _WIN32
         closesocket(client);
 #else
@@ -580,7 +624,7 @@ static void handleConnection(SocketType client, sqlite3* db)
         }
     }
 
-    std::string path = request.path;
+    std::string path = api::normalizePath(request.path);
     std::string responseBody;
     int statusCode = 200;
 
@@ -588,12 +632,14 @@ static void handleConnection(SocketType client, sqlite3* db)
     if (request.method == "OPTIONS") {
         statusCode = 204;
         responseBody = "";
-    } else if (apiKeyIt == request.headers.end() || apiKeyIt->second != "gym-secret-key") {
+    } else if (apiKeyIt == request.headers.end() || apiKeyIt->second != context.api_key) {
         statusCode = 401;
         responseBody = jsonError("Unauthorized");
-    } else if (request.method == "GET" && path == "/members") {
+    } else if (request.method == "GET" && path == api::kMembersChanges) {
+        responseBody = handleMemberChanges(db, request.query);
+    } else if (request.method == "GET" && path == api::kMembers) {
         responseBody = handleMemberCollection(db, request);
-    } else if (request.method == "POST" && path == "/members") {
+    } else if (request.method == "POST" && path == api::kMembers) {
         responseBody = handleMemberCollection(db, request);
         if (responseBody.find("already exists") != std::string::npos) {
             statusCode = 409;
@@ -602,20 +648,20 @@ static void handleConnection(SocketType client, sqlite3* db)
         } else {
             statusCode = 201;
         }
-    } else if (request.method == "GET" && path == "/stats") {
+    } else if (request.method == "GET" && path == api::kStats) {
         responseBody = handleStats(db);
-    } else if (request.method == "GET" && path == "/enrollment/pending") {
+    } else if (request.method == "GET" && path == api::kEnrollmentPending) {
         responseBody = handleEnrollmentPending(db);
-    } else if (request.method == "POST" && path == "/enrollment/start") {
+    } else if (request.method == "POST" && path == api::kEnrollmentStart) {
         responseBody = handleEnrollmentStart(db, request.body);
-    } else if (request.method == "POST" && path == "/enrollment/result") {
+    } else if (request.method == "POST" && path == api::kEnrollmentResult) {
         responseBody = handleEnrollmentResult(db, request.body);
-    } else if (request.method == "GET" && path == "/access/logs") {
+    } else if (request.method == "GET" && path == api::kAccessLogs) {
         responseBody = handleAccessLogs(db, request);
     } else if (request.method == "GET" && path.rfind("/access/logs/", 0) == 0) {
         std::string memberId = urlDecode(path.substr(std::string("/access/logs/").size()));
         responseBody = handleAccessLogsByMember(db, memberId);
-    } else if (request.method == "POST" && path == "/access/log") {
+    } else if (request.method == "POST" && path == api::kAccessLog) {
         responseBody = handleAccessLogPost(db, request.body);
         if (responseBody.find("\"success\":false") != std::string::npos) {
             statusCode = 400;
@@ -638,6 +684,7 @@ static void handleConnection(SocketType client, sqlite3* db)
     }
 
     sendResponse(client, statusCode, responseBody);
+    closeDatabase(db);
 
 #ifdef _WIN32
     closesocket(client);
@@ -646,58 +693,104 @@ static void handleConnection(SocketType client, sqlite3* db)
 #endif
 }
 
-int main()
+RestServer::RestServer(Config config)
+    : config_(std::move(config))
+{
+}
+
+RestServer::~RestServer()
+{
+    requestStop();
+    waitUntilStopped();
+}
+
+bool RestServer::initializeDatabaseSchema()
+{
+    sqlite3* db = nullptr;
+    if (!openDatabase(db, config_.db_path)) {
+        return false;
+    }
+
+    bool ok = createMembersTable(db) &&
+              createSyncStatusTable(db) &&
+              initializeSyncStatus(db) &&
+              createAccessLogsTable(db);
+    closeDatabase(db);
+    return ok;
+}
+
+bool RestServer::startInBackground()
+{
+    if (running_.load()) {
+        return true;
+    }
+
+    stop_requested_.store(false);
+    server_thread_ = std::thread(&RestServer::serverLoop, this);
+    return true;
+}
+
+void RestServer::requestStop()
+{
+    stop_requested_.store(true);
+#ifdef _WIN32
+    SocketType sock = static_cast<SocketType>(server_socket_);
+    if (sock != INVALID_SOCKET) {
+        closesocket(sock);
+    }
+#else
+    if (server_socket_ >= 0) {
+        close(server_socket_);
+    }
+#endif
+}
+
+void RestServer::waitUntilStopped()
+{
+    if (server_thread_.joinable()) {
+        server_thread_.join();
+    }
+}
+
+void RestServer::serverLoop()
 {
 #ifdef _WIN32
     WSADATA wsaData;
     if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0) {
         std::cerr << "WSAStartup failed" << std::endl;
-        return 1;
+        return;
     }
 #endif
-
-    sqlite3* db = nullptr;
-    if (!openDatabase(db, "members.db")) {
-        std::cerr << "Failed to open SQLite database" << std::endl;
-        return 1;
-    }
-
-    if (!createMembersTable(db) || !createSyncStatusTable(db) || !initializeSyncStatus(db) || !createAccessLogsTable(db)) {
-        std::cerr << "Failed to initialize database schema" << std::endl;
-        closeDatabase(db);
-        return 1;
-    }
 
     SocketType serverSocket = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
 #ifdef _WIN32
+    server_socket_ = static_cast<uintptr_t>(serverSocket);
     if (serverSocket == INVALID_SOCKET) {
 #else
+    server_socket_ = serverSocket;
     if (serverSocket < 0) {
 #endif
         std::cerr << "Failed to create socket" << std::endl;
-        closeDatabase(db);
-        return 1;
+        return;
     }
 
-    sockaddr_in serverAddress;
-    std::memset(&serverAddress, 0, sizeof(serverAddress));
+    sockaddr_in serverAddress{};
     serverAddress.sin_family = AF_INET;
     serverAddress.sin_addr.s_addr = INADDR_ANY;
-    serverAddress.sin_port = htons(8080);
+    serverAddress.sin_port = htons(static_cast<uint16_t>(config_.port));
 
     int reuse = 1;
     setsockopt(serverSocket, SOL_SOCKET, SO_REUSEADDR, reinterpret_cast<const char*>(&reuse), sizeof(reuse));
 
     if (bind(serverSocket, reinterpret_cast<sockaddr*>(&serverAddress), sizeof(serverAddress)) < 0) {
-        std::cerr << "Failed to bind socket" << std::endl;
+        std::cerr << "Failed to bind socket on port " << config_.port << std::endl;
 #ifdef _WIN32
         closesocket(serverSocket);
         WSACleanup();
 #else
         close(serverSocket);
 #endif
-        closeDatabase(db);
-        return 1;
+        return;
     }
 
     if (listen(serverSocket, 10) < 0) {
@@ -708,15 +801,16 @@ int main()
 #else
         close(serverSocket);
 #endif
-        closeDatabase(db);
-        return 1;
+        return;
     }
 
-    std::cout << "Crow-style REST server running on http://localhost:8080" << std::endl;
-    std::cout << "Endpoints: GET /members, GET /members/{id}, POST /members, PUT /members/{id}, DELETE /members/{id}, GET /stats, GET /access/{member_id}, GET /access/logs, GET /access/logs/{member_id}, POST /access/log, GET /enrollment/pending, POST /enrollment/start, POST /enrollment/result" << std::endl;
+    running_.store(true);
+    std::cout << "REST server running on http://localhost:" << config_.port << std::endl;
 
-    while (true) {
-        sockaddr_in clientAddress;
+    ConnectionContext context{config_.db_path, config_.api_key};
+
+    while (!stop_requested_.load()) {
+        sockaddr_in clientAddress{};
         socklen_t clientLen = sizeof(clientAddress);
         SocketType clientSocket = accept(serverSocket, reinterpret_cast<sockaddr*>(&clientAddress), &clientLen);
 #ifdef _WIN32
@@ -724,10 +818,13 @@ int main()
 #else
         if (clientSocket < 0) {
 #endif
+            if (stop_requested_.load()) {
+                break;
+            }
             continue;
         }
 
-        std::thread(handleConnection, clientSocket, db).detach();
+        std::thread(handleConnection, clientSocket, context).detach();
     }
 
 #ifdef _WIN32
@@ -736,6 +833,6 @@ int main()
 #else
     close(serverSocket);
 #endif
-    closeDatabase(db);
-    return 0;
+
+    running_.store(false);
 }

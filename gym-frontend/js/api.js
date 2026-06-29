@@ -120,6 +120,16 @@ const API = (() => {
 
     // Access
     checkAccess: (id) => request("GET", "/access/" + encodeURIComponent(id)),
+    // Evaluate access and write a check-in row to access_logs.
+    checkIn: (id) =>
+      request("GET", "/access/" + encodeURIComponent(id)).then((access) =>
+        request("POST", "/access/log", {
+          member_id: id,
+          granted: access.granted,
+          reason: access.message,
+          source: "admin-portal-check-in",
+        }).then(() => access)
+      ),
     getLogs: (date) =>
       request("GET", "/access/logs" + (date ? "?date=" + encodeURIComponent(date) : "")).then(
         (d) => d.logs || []
@@ -137,7 +147,7 @@ const API = (() => {
     submitEnrollment: (id, fingerprint) =>
       request("POST", "/enrollment/result", {
         member_id: id,
-        fingerprint_template: fingerprint,
+        member_fingerprint_template: fingerprint,
       }),
   };
 })();

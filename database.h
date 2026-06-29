@@ -30,11 +30,12 @@ struct AccessLog {
     std::string reason;
     std::string timestamp;
     std::string source;
+    std::string idempotency_key;
 };
 
 bool createAccessLogsTable(sqlite3* db);
 std::vector<AccessLog> getAccessLogs(sqlite3* db);
 std::vector<AccessLog> getLogsByMember(sqlite3* db, const std::string& member_id);
 std::vector<AccessLog> getLogsByDate(sqlite3* db, const std::string& date);
-bool logAccessAttempt(sqlite3* db, const std::string& member_id, bool granted, const std::string& reason, const std::string& timestamp, const std::string& source);
+bool logAccessAttempt(sqlite3* db, const std::string& member_id, bool granted, const std::string& reason, const std::string& timestamp, const std::string& source, const std::string& idempotency_key = "");
 void closeDatabase(sqlite3* db);

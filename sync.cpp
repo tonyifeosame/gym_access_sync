@@ -1,4 +1,5 @@
 #include "sync.h"
+#include "api_client.h"
 #include "database.h"
 #include "validation.h"
 
@@ -23,12 +24,22 @@ static std::string getCurrentTimestamp()
     return oss.str();
 }
 
-void logError(const std::string& message)
+static void writeLog(const std::string& level, const std::string& message)
 {
     std::ofstream logFile("sync.log", std::ios::app);
     if (logFile.is_open()) {
-        logFile << getCurrentTimestamp() << " - " << message << std::endl;
+        logFile << getCurrentTimestamp() << " [" << level << "] " << message << std::endl;
     }
+}
+
+void logInfo(const std::string& message)
+{
+    writeLog("INFO", message);
+}
+
+void logError(const std::string& message)
+{
+    writeLog("ERROR", message);
 }
 
 bool recordLastSync(sqlite3* db)
@@ -126,8 +137,58 @@ void synchronizeDeletedMembers(sqlite3* db, const std::vector<Member>& sourceMem
 {
     int res = removeMissingMembers(db, sourceMembers, false, !hardDelete);
     if (res >= 0) {
-        logError(std::string("removeMissingMembers affected count: ") + std::to_string(res));
+        logInfo(std::string("removeMissingMembers affected count: ") + std::to_string(res));
     } else {
         logError("removeMissingMembers encountered an error");
     }
+}
+
+bool runSyncCycle(sqlite3* db, ApiClient& apiClient)
+{
+    auto lastSync = getLastSyncTime(db).value_or("1970-01-01 00:00:00");
+    logInfo("Starting sync cycle. Last successful sync: " + lastSync);
+
+    if (lastSync == "1970-01-01 00:00:00") {
+        auto members = apiClient.fetchAllMembers(db);
+        if (!validateDuplicateIds(members)) {
+            logError("Duplicate IDs found in cloud member list. Synchronization aborted.");
+            return false;
+        }
+
+        int validCount = 0;
+        int invalidCount = 0;
+        for (const auto& member : members) {
+            if (validateMember(member)) {
+                validCount++;
+            } else {
+                invalidCount++;
+            }
+        }
+
+        logInfo("Full sync: " + std::to_string(members.size()) + " members (" +
+                std::to_string(validCount) + " valid, " + std::to_string(invalidCount) + " skipped)");
+        synchronizeMembers(db, members);
+        synchronizeDeletedMembers(db, members);
+    } else {
+        auto changedMembers = apiClient.fetchChangedMembers(lastSync, db);
+        logInfo("Incremental sync: " + std::to_string(changedMembers.size()) + " changed members");
+
+        if (!changedMembers.empty()) {
+            if (!validateDuplicateIds(changedMembers)) {
+                logError("Duplicate IDs found in changed member list. Synchronization aborted.");
+                return false;
+            }
+            synchronizeMembers(db, changedMembers);
+        }
+        logInfo("Skipping missing-member cleanup for incremental sync.");
+    }
+
+    if (!recordLastSync(db)) {
+        logError("Failed to record sync timestamp");
+        return false;
+    }
+
+    auto newLastSync = getLastSyncTime(db).value_or("unknown");
+    logInfo("Sync cycle completed. Last successful sync: " + newLastSync);
+    return true;
 }

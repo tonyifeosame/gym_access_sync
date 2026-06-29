@@ -16,6 +16,7 @@ struct ApiConfig {
     std::string api_url;
     std::string api_key;
     int sync_interval_seconds = 60;
+    int server_port = 8080;
     std::string site_name;
     bool offline_mode = false;
     ScannerConfig scanner;
@@ -40,6 +41,10 @@ public:
     std::vector<Member> fetchChangedMembers(const std::string& lastSyncTime, sqlite3* localDb = nullptr);
     std::optional<Member> fetchMember(const std::string& member_id);
     std::optional<AccessResult> fetchAccess(const std::string& member_id, sqlite3* localDb = nullptr);
+    bool postAccessLog(const std::string& member_id, bool granted, const std::string& reason,
+                       const std::string& source, sqlite3* localDb = nullptr);
+  // Evaluate access and persist a check-in record via POST /access/log (online DB).
+    std::optional<AccessResult> checkIn(const std::string& member_id, sqlite3* localDb = nullptr);
 
     bool startEnrollment(const std::string& member_id, sqlite3* localDb = nullptr);
     std::vector<std::string> fetchPendingEnrollments(sqlite3* localDb = nullptr);

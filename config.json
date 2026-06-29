@@ -1,6 +1,7 @@
 {
   "api_url": "http://localhost:8080",
   "api_key": "gym-secret-key",
+  "server_port": 8080,
   "sync_interval_seconds": 60,
   "site_name": "Main Gym",
   "offline_mode": true,

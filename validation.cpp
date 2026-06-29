@@ -23,7 +23,9 @@ ValidationResult validateName(const Member& member)
 ValidationResult validateStatus(const Member& member)
 {
     ValidationResult result{true, {}};
-    if (member.member_status != "ACTIVE" && member.member_status != "INACTIVE") {
+    if (member.member_status != "ACTIVE" &&
+        member.member_status != "INACTIVE" &&
+        member.member_status != "PENDING_ENROLLMENT") {
         result.is_valid = false;
         result.errors.push_back("Invalid status");
     }
@@ -52,11 +54,21 @@ ValidationResult validateMemberId(const Member& member)
 
 bool validateMember(const Member& member)
 {
+    if (!validateMemberId(member).is_valid || !validateName(member).is_valid) {
+        return false;
+    }
+
+    if (!validateStatus(member).is_valid) {
+        return false;
+    }
+
+    // Members awaiting enrollment may not have a fingerprint or expiry date yet.
+    if (member.member_status == "PENDING_ENROLLMENT") {
+        return true;
+    }
+
     return validateFingerprint(member).is_valid &&
-           validateName(member).is_valid &&
-           validateStatus(member).is_valid &&
-           validateExpiringDate(member).is_valid &&
-           validateMemberId(member).is_valid;
+           validateExpiringDate(member).is_valid;
 }
 
 bool validateDuplicateIds(const std::vector<Member>& members)

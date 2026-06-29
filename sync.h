@@ -3,9 +3,12 @@
 #include <string>
 #include <vector>
 #include <sqlite3.h>
+#include "api_client.h"
 #include "member.h"
 
+void logInfo(const std::string& message);
 void logError(const std::string& message);
+bool runSyncCycle(sqlite3* db, ApiClient& apiClient);
 void synchronizeMembers(sqlite3* db, const std::vector<Member>& members);
 void synchronizeDeletedMembers(sqlite3* db, const std::vector<Member>& sourceMembers, bool hardDelete = true);
 bool recordLastSync(sqlite3* db);

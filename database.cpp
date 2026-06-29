@@ -41,7 +41,8 @@ bool createAccessLogsTable(sqlite3* db)
         "granted INTEGER, "
         "reason TEXT, "
         "timestamp TEXT, "
-        "source TEXT" 
+        "source TEXT, "
+        "idempotency_key TEXT UNIQUE" 
         ");";
 
     if (sqlite3_exec(db, sql, nullptr, nullptr, nullptr) != SQLITE_OK) {
@@ -51,6 +52,7 @@ bool createAccessLogsTable(sqlite3* db)
     const char* pragmaSql = "PRAGMA table_info(access_logs);";
     sqlite3_stmt* stmt = nullptr;
     bool hasSourceColumn = false;
+    bool hasIdempotencyKeyColumn = false;
 
     if (sqlite3_prepare_v2(db, pragmaSql, -1, &stmt, nullptr) != SQLITE_OK) {
         return false;
@@ -58,9 +60,13 @@ bool createAccessLogsTable(sqlite3* db)
 
     while (sqlite3_step(stmt) == SQLITE_ROW) {
         const unsigned char* columnName = sqlite3_column_text(stmt, 1);
-        if (columnName && std::string(reinterpret_cast<const char*>(columnName)) == "source") {
-            hasSourceColumn = true;
-            break;
+        if (columnName) {
+            std::string colName = reinterpret_cast<const char*>(columnName);
+            if (colName == "source") {
+                hasSourceColumn = true;
+            } else if (colName == "idempotency_key") {
+                hasIdempotencyKeyColumn = true;
+            }
         }
     }
     sqlite3_finalize(stmt);
@@ -68,6 +74,19 @@ bool createAccessLogsTable(sqlite3* db)
     if (!hasSourceColumn) {
         const char* alterSql = "ALTER TABLE access_logs ADD COLUMN source TEXT;";
         if (sqlite3_exec(db, alterSql, nullptr, nullptr, nullptr) != SQLITE_OK) {
+            return false;
+        }
+    }
+
+    if (!hasIdempotencyKeyColumn) {
+        const char* alterSql = "ALTER TABLE access_logs ADD COLUMN idempotency_key TEXT;";
+        if (sqlite3_exec(db, alterSql, nullptr, nullptr, nullptr) != SQLITE_OK) {
+            return false;
+        }
+        
+        // Create unique index on idempotency_key for existing databases
+        const char* indexSql = "CREATE UNIQUE INDEX IF NOT EXISTS idx_access_logs_idempotency_key ON access_logs(idempotency_key);";
+        if (sqlite3_exec(db, indexSql, nullptr, nullptr, nullptr) != SQLITE_OK) {
             return false;
         }
     }
@@ -96,9 +115,9 @@ bool updateLastSyncTime(sqlite3* db, const std::string& timestamp)
     return success;
 }
 
-bool logAccessAttempt(sqlite3* db, const std::string& member_id, bool granted, const std::string& reason, const std::string& timestamp, const std::string& source)
+bool logAccessAttempt(sqlite3* db, const std::string& member_id, bool granted, const std::string& reason, const std::string& timestamp, const std::string& source, const std::string& idempotency_key)
 {
-    const char* sql = "INSERT INTO access_logs (member_id, granted, reason, timestamp, source) VALUES (?, ?, ?, ?, ?);";
+    const char* sql = "INSERT OR IGNORE INTO access_logs (member_id, granted, reason, timestamp, source, idempotency_key) VALUES (?, ?, ?, ?, ?, ?);";
     sqlite3_stmt* stmt = nullptr;
 
     if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) != SQLITE_OK) {
@@ -110,6 +129,7 @@ bool logAccessAttempt(sqlite3* db, const std::string& member_id, bool granted, c
     sqlite3_bind_text(stmt, 3, reason.c_str(), -1, SQLITE_TRANSIENT);
     sqlite3_bind_text(stmt, 4, timestamp.c_str(), -1, SQLITE_TRANSIENT);
     sqlite3_bind_text(stmt, 5, source.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 6, idempotency_key.c_str(), -1, SQLITE_TRANSIENT);
 
     bool success = sqlite3_step(stmt) == SQLITE_DONE;
     sqlite3_finalize(stmt);
@@ -125,12 +145,14 @@ static AccessLog readAccessLogRow(sqlite3_stmt* stmt)
     log.reason = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 3));
     log.timestamp = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 4));
     log.source = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 5));
+    const unsigned char* idempotencyKeyText = sqlite3_column_text(stmt, 6);
+    log.idempotency_key = idempotencyKeyText ? reinterpret_cast<const char*>(idempotencyKeyText) : "";
     return log;
 }
 
 std::vector<AccessLog> getAccessLogs(sqlite3* db)
 {
-    const char* sql = "SELECT id, member_id, granted, reason, timestamp, source FROM access_logs ORDER BY timestamp DESC;";
+    const char* sql = "SELECT id, member_id, granted, reason, timestamp, source, idempotency_key FROM access_logs ORDER BY timestamp DESC;";
     sqlite3_stmt* stmt = nullptr;
     std::vector<AccessLog> logs;
 
@@ -147,7 +169,7 @@ std::vector<AccessLog> getAccessLogs(sqlite3* db)
 
 std::vector<AccessLog> getLogsByMember(sqlite3* db, const std::string& member_id)
 {
-    const char* sql = "SELECT id, member_id, granted, reason, timestamp, source FROM access_logs WHERE member_id = ? ORDER BY timestamp DESC;";
+    const char* sql = "SELECT id, member_id, granted, reason, timestamp, source, idempotency_key FROM access_logs WHERE member_id = ? ORDER BY timestamp DESC;";
     sqlite3_stmt* stmt = nullptr;
     std::vector<AccessLog> logs;
 
@@ -165,7 +187,7 @@ std::vector<AccessLog> getLogsByMember(sqlite3* db, const std::string& member_id
 
 std::vector<AccessLog> getLogsByDate(sqlite3* db, const std::string& date)
 {
-    const char* sql = "SELECT id, member_id, granted, reason, timestamp, source FROM access_logs WHERE substr(timestamp, 1, 10) = ? ORDER BY timestamp DESC;";
+    const char* sql = "SELECT id, member_id, granted, reason, timestamp, source, idempotency_key FROM access_logs WHERE substr(timestamp, 1, 10) = ? ORDER BY timestamp DESC;";
     sqlite3_stmt* stmt = nullptr;
     std::vector<AccessLog> logs;
 

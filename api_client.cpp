@@ -1,5 +1,5 @@
 #include "api_client.h"
-#include "api_mock.h"
+#include "api_paths.h"
 #include "database.h"
 #include <fstream>
 #include <sstream>
@@ -106,15 +106,30 @@ static bool extractJsonBoolField(const std::string& text, const std::string& key
     return fallback;
 }
 
-static std::vector<Member> getMockCloudMembers()
+static std::string urlEncode(const std::string& value)
 {
-    return {
-        {"001", "John Doe", "template1", "ACTIVE", "2024-12-31", "2026-06-06 10:00:00"},
-        {"002", "Jane Smith", "template2", "INACTIVE", "2023-06-30", "2026-06-06 10:05:00"},
-        {"003", "Alice Johnson", "", "ACTIVE", "2025-03-15", "2026-06-06 10:10:00"},
-        {"004", "", "template4", "ACTIVE", "2024-09-30", "2026-06-06 10:15:00"},
-        {"005", "New Member", "template5", "ACTIVE", "2025-12-31", "2026-06-08 08:00:00"}
-    };
+    std::ostringstream escaped;
+    escaped.fill('0');
+    escaped << std::hex << std::uppercase;
+    for (unsigned char c : value) {
+        if (std::isalnum(c) || c == '-' || c == '_' || c == '.' || c == '~') {
+            escaped << c;
+            escaped << std::dec;
+        } else {
+            escaped << '%' << std::setw(2) << static_cast<int>(c);
+            escaped << std::dec;
+        }
+    }
+    return escaped.str();
+}
+
+static std::string buildApiUrl(const ApiConfig& config, const std::string& pathAndQuery)
+{
+    std::string url = config.api_url;
+    if (!url.empty() && url.back() == '/') {
+        url.pop_back();
+    }
+    return url + pathAndQuery;
 }
 
 static bool initializeSockets()
@@ -269,6 +284,16 @@ static std::string getCurrentTimestamp()
     return oss.str();
 }
 
+static std::string generateIdempotencyKey()
+{
+    auto now = std::chrono::system_clock::now();
+    auto duration = now.time_since_epoch();
+    auto millis = std::chrono::duration_cast<std::chrono::milliseconds>(duration).count();
+    std::ostringstream oss;
+    oss << millis << "-" << std::rand();
+    return oss.str();
+}
+
 static std::optional<HttpResponse> httpPost(const std::string& url, const ApiConfig& config, const std::string& body, const std::string& contentType = "application/json")
 {
     if (!initializeSockets()) {
@@ -396,6 +421,7 @@ bool loadConfig(const std::string& configPath, ApiConfig& config)
     config.sync_interval_seconds = std::stoi(extractJsonIntField(text, "sync_interval_seconds", 60));
     config.site_name = extractJsonString(text, "site_name");
     config.offline_mode = extractJsonBoolField(text, "offline_mode", false);
+    config.server_port = std::stoi(extractJsonIntField(text, "server_port", 8080));
     config.scanner.ip = extractJsonString(text, "scanner_ip");
     config.scanner.port = std::stoi(extractJsonIntField(text, "scanner_port", 4370));
     config.scanner.timeout = std::stoi(extractJsonIntField(text, "enrollment_timeout", 30));
@@ -415,15 +441,32 @@ static std::optional<Member> parseMemberObject(const std::string& object)
     if (member.member_id.empty()) {
         return std::nullopt;
     }
-    member.member_name = extractJsonString(object, "full_name");
-    member.member_fingerprint_template = extractJsonString(object, "fingerprint_template");
-    
-    // Map Go API's 'active' boolean to 'member_status' string
-    bool active = extractJsonBoolField(object, "active", false);
-    member.member_status = active ? "ACTIVE" : "INACTIVE";
-    
-    member.member_expiring_date = extractJsonString(object, "membership_type");
-    member.last_updated = extractJsonString(object, "updated_at");
+
+    // Canonical local schema (crow_server / gym-frontend).
+    member.member_name = extractJsonString(object, "member_name");
+    member.member_fingerprint_template = extractJsonString(object, "member_fingerprint_template");
+    member.member_status = extractJsonString(object, "member_status");
+    member.member_expiring_date = extractJsonString(object, "member_expiring_date");
+    member.last_updated = extractJsonString(object, "last_updated");
+
+    // Cloud / Go API field aliases (future remote backend).
+    if (member.member_name.empty()) {
+        member.member_name = extractJsonString(object, "full_name");
+    }
+    if (member.member_fingerprint_template.empty()) {
+        member.member_fingerprint_template = extractJsonString(object, "fingerprint_template");
+    }
+    if (member.member_status.empty()) {
+        bool active = extractJsonBoolField(object, "active", false);
+        member.member_status = active ? "ACTIVE" : "INACTIVE";
+    }
+    if (member.member_expiring_date.empty()) {
+        member.member_expiring_date = extractJsonString(object, "membership_type");
+    }
+    if (member.last_updated.empty()) {
+        member.last_updated = extractJsonString(object, "updated_at");
+    }
+
     return member;
 }
 
@@ -451,11 +494,7 @@ static std::vector<Member> parseMembersArray(const std::string& payload)
 
 std::vector<Member> ApiClient::fetchAllMembers(sqlite3* localDb)
 {
-    std::string url = config_.api_url;
-    if (!url.empty() && url.back() == '/') {
-        url.pop_back();
-    }
-    url += "/api/v1/members";
+    const std::string url = buildApiUrl(config_, api::kMembers);
 
     auto response = httpGet(url, config_);
     if (response && response->statusCode == 200) {
@@ -471,11 +510,7 @@ std::vector<Member> ApiClient::fetchAllMembers(sqlite3* localDb)
 
 std::vector<Member> ApiClient::fetchChangedMembers(const std::string& lastSyncTime, sqlite3* localDb)
 {
-    std::string url = config_.api_url;
-    if (!url.empty() && url.back() == '/') {
-        url.pop_back();
-    }
-    url += "/api/v1/members/changes?since=" + lastSyncTime;
+    const std::string url = buildApiUrl(config_, api::membersChangesQuery(urlEncode(lastSyncTime)));
 
     auto response = httpGet(url, config_);
     if (response && response->statusCode == 200) {
@@ -491,11 +526,7 @@ std::vector<Member> ApiClient::fetchChangedMembers(const std::string& lastSyncTi
 
 std::optional<Member> ApiClient::fetchMember(const std::string& member_id)
 {
-    std::string url = config_.api_url;
-    if (!url.empty() && url.back() == '/') {
-        url.pop_back();
-    }
-    url += "/api/v1/members/" + member_id;
+    const std::string url = buildApiUrl(config_, api::memberPath(member_id));
 
     auto response = httpGet(url, config_);
     if (response && response->statusCode == 200) {
@@ -586,11 +617,7 @@ static std::optional<AccessResult> fetchAccessFromLocal(sqlite3* localDb, const 
 
 std::optional<AccessResult> ApiClient::fetchAccess(const std::string& member_id, sqlite3* localDb)
 {
-    std::string url = config_.api_url;
-    if (!url.empty() && url.back() == '/') {
-        url.pop_back();
-    }
-    url += "/api/v1/access/" + member_id;
+    const std::string url = buildApiUrl(config_, api::accessPath(member_id));
 
     auto response = httpGet(url, config_);
     if (!response) {
@@ -625,13 +652,71 @@ std::optional<AccessResult> ApiClient::fetchAccess(const std::string& member_id,
     return parsed;
 }
 
+static std::string jsonEscapeMinimal(const std::string& value)
+{
+    std::string escaped;
+    escaped.reserve(value.size());
+    for (char c : value) {
+        if (c == '"') {
+            escaped += "\\\"";
+        } else if (c == '\\') {
+            escaped += "\\\\";
+        } else {
+            escaped += c;
+        }
+    }
+    return escaped;
+}
+
+bool ApiClient::postAccessLog(const std::string& member_id, bool granted,
+                              const std::string& reason, const std::string& source,
+                              sqlite3* localDb)
+{
+    const std::string url = buildApiUrl(config_, api::kAccessLog);
+    const std::string timestamp = getCurrentTimestamp();
+    const std::string idempotencyKey = generateIdempotencyKey();
+
+    std::ostringstream payload;
+    payload << "{\"member_id\":\"" << jsonEscapeMinimal(member_id) << "\",";
+    payload << "\"granted\":" << (granted ? "true" : "false") << ",";
+    payload << "\"reason\":\"" << jsonEscapeMinimal(reason) << "\",";
+    payload << "\"source\":\"" << jsonEscapeMinimal(source) << "\",";
+    payload << "\"timestamp\":\"" << jsonEscapeMinimal(timestamp) << "\",";
+    payload << "\"idempotency_key\":\"" << jsonEscapeMinimal(idempotencyKey) << "\"}";
+
+    auto response = httpPost(url, config_, payload.str());
+    if (response && response->statusCode == 200) {
+        return true;
+    }
+
+    if (localDb && config_.offline_mode) {
+        return logAccessAttempt(localDb, member_id, granted, reason, timestamp, source, idempotencyKey);
+    }
+
+    return false;
+}
+
+std::optional<AccessResult> ApiClient::checkIn(const std::string& member_id, sqlite3* localDb)
+{
+    auto accessOpt = fetchAccess(member_id, localDb);
+    if (!accessOpt) {
+        return std::nullopt;
+    }
+
+    const AccessResult& access = *accessOpt;
+    std::string logSource = access.source;
+    if (logSource == "API") {
+        logSource = "terminal-check-in";
+    }
+
+    postAccessLog(member_id, access.granted, access.message, logSource, localDb);
+
+    return accessOpt;
+}
+
 bool ApiClient::startEnrollment(const std::string& member_id, sqlite3* localDb)
 {
-    std::string url = config_.api_url;
-    if (!url.empty() && url.back() == '/') {
-        url.pop_back();
-    }
-    url += "/api/v1/enrollment/start";
+    const std::string url = buildApiUrl(config_, api::kEnrollmentStart);
 
     std::ostringstream payload;
     payload << "{\"member_id\":\"" << member_id << "\"}";
@@ -655,11 +740,7 @@ bool ApiClient::startEnrollment(const std::string& member_id, sqlite3* localDb)
 
 std::vector<std::string> ApiClient::fetchPendingEnrollments(sqlite3* localDb)
 {
-    std::string url = config_.api_url;
-    if (!url.empty() && url.back() == '/') {
-        url.pop_back();
-    }
-    url += "/api/v1/enrollment/pending";
+    const std::string url = buildApiUrl(config_, api::kEnrollmentPending);
 
     auto response = httpGet(url, config_);
     if (response && response->statusCode == 200) {
@@ -680,15 +761,11 @@ std::vector<std::string> ApiClient::fetchPendingEnrollments(sqlite3* localDb)
 
 bool ApiClient::submitEnrollmentResult(const std::string& member_id, const std::string& fingerprintTemplate, sqlite3* localDb)
 {
-    std::string url = config_.api_url;
-    if (!url.empty() && url.back() == '/') {
-        url.pop_back();
-    }
-    url += "/api/v1/enrollment/result";
+    const std::string url = buildApiUrl(config_, api::kEnrollmentResult);
 
     std::ostringstream payload;
     payload << "{\"member_id\":\"" << member_id << "\",";
-    payload << "\"fingerprint_template\":\"" << fingerprintTemplate << "\"}";
+    payload << "\"member_fingerprint_template\":\"" << fingerprintTemplate << "\"}";
 
     auto response = httpPost(url, config_, payload.str());
     if (response && response->statusCode == 200) {

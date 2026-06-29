@@ -6,6 +6,7 @@
 #include "mock_fingerprint_scanner.h"
 #include "door_controller.h"
 #include "mock_relay.h"
+#include "validation.h"
 
 static bool runDatabaseTests()
 {
@@ -28,7 +29,7 @@ static bool runDatabaseTests()
     assert(activeMembers.size() == 1);
     assert(activeMembers[0].member_id == "100");
 
-    assert(logAccessAttempt(db, "100", true, "Test", "2026-06-07 00:00:00", "UNIT_TEST"));
+    assert(logAccessAttempt(db, "100", true, "Test", "2026-06-07 00:00:00", "UNIT_TEST", ""));
     auto logs = getAccessLogs(db);
     assert(logs.size() == 1);
     assert(logs[0].member_id == "100");
@@ -46,6 +47,7 @@ static bool runApiClientTests()
     assert(createMembersTable(db));
     assert(createSyncStatusTable(db));
     assert(initializeSyncStatus(db));
+    assert(createAccessLogsTable(db));
 
     ApiConfig config;
     config.api_url = "http://127.0.0.1:9999";
@@ -71,6 +73,13 @@ static bool runApiClientTests()
     assert(updated.has_value());
     assert(updated->member_status == "ACTIVE");
     assert(updated->member_fingerprint_template == "template-101");
+
+    assert(apiClient.postAccessLog("101", true, "Unit test check-in", "UNIT_TEST", db));
+    auto logs = getAccessLogs(db);
+    assert(logs.size() == 1);
+    assert(logs[0].member_id == "101");
+    assert(logs[0].granted);
+    assert(logs[0].source == "UNIT_TEST");
 
     closeDatabase(db);
     return true;
@@ -116,6 +125,19 @@ static bool runDoorControllerTests()
     return true;
 }
 
+static bool runValidationTests()
+{
+    Member pending{"200", "Pending User", "", "PENDING_ENROLLMENT", "", "2026-06-09 00:00:00"};
+    assert(validateMember(pending));
+
+    Member active{"201", "Active User", "template-201", "ACTIVE", "2099-12-31", "2026-06-09 00:00:00"};
+    assert(validateMember(active));
+
+    Member missingFingerprint{"202", "Bad User", "", "ACTIVE", "2099-12-31", "2026-06-09 00:00:00"};
+    assert(!validateMember(missingFingerprint));
+    return true;
+}
+
 int main()
 {
     std::cout << "Running unit tests..." << std::endl;
@@ -127,6 +149,8 @@ int main()
     std::cout << "FingerprintService tests passed." << std::endl;
     assert(runDoorControllerTests());
     std::cout << "DoorController tests passed." << std::endl;
+    assert(runValidationTests());
+    std::cout << "Validation tests passed." << std::endl;
     std::cout << "All unit tests passed." << std::endl;
     return 0;
 }
