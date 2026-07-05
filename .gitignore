@@ -1,7 +1,23 @@
 # Build artifacts
-gym_server
-*.o
-*.out
+build/
+build_*/
 
-# Local SQLite databases
+# Executables
+*.exe
+gym_server
+
+# Runtime libraries
+*.dll
+
+# Databases
 *.db
+
+# Object files
+*.o
+*.obj
+
+# Logs
+*.log
+
+# VS Code
+.vscode/
