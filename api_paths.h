@@ -16,6 +16,9 @@ inline constexpr const char* kEnrollmentPending = "/enrollment/pending";
 inline constexpr const char* kEnrollmentResult = "/enrollment/result";
 inline constexpr const char* kAccessLogs = "/access/logs";
 inline constexpr const char* kAccessLog = "/access/log";
+inline constexpr const char* kDeviceHeartbeat = "/device/heartbeat";
+inline constexpr const char* kDeviceStatus = "/device/status";
+inline constexpr const char* kDeviceCommands = "/device/commands";
 
 inline std::string normalizePath(std::string path)
 {

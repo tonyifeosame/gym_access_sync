@@ -6,6 +6,7 @@
 #include "mock_fingerprint_scanner.h"
 #include "door_controller.h"
 #include "mock_relay.h"
+#include "mock_esp32_device.h"
 #include "validation.h"
 
 static bool runDatabaseTests()
@@ -138,6 +139,44 @@ static bool runValidationTests()
     return true;
 }
 
+static bool runDeviceTests()
+{
+    sqlite3* db = nullptr;
+    assert(openDatabase(db, ":memory:"));
+    assert(createMembersTable(db));
+    assert(createSyncStatusTable(db));
+    assert(initializeSyncStatus(db));
+    assert(createAccessLogsTable(db));
+    assert(createDeviceCommandQueueTable(db));
+    assert(createDeviceStatusTable(db));
+
+    DeviceCommand command;
+    command.device_id = "esp32-test";
+    command.command_type = "ENROLL";
+    command.payload = "member-300";
+    command.status = "PENDING";
+    assert(queueDeviceCommand(db, command));
+
+    auto queued = getDeviceCommands(db, "esp32-test");
+    assert(queued.size() == 1);
+    assert(queued[0].command_type == "ENROLL");
+
+    assert(updateDeviceStatus(db, "esp32-test", "ONLINE", "2026-07-05 12:00:00", "heartbeat"));
+    auto status = getDeviceStatus(db, "esp32-test");
+    assert(status.has_value());
+    assert(status->status == "ONLINE");
+
+    MockEsp32Device device("esp32-test");
+    assert(device.simulateEnrollment("member-300"));
+    assert(device.simulateVerification("member-300"));
+    assert(device.simulateUnlock(3));
+    assert(device.simulateHeartbeat());
+    assert(!device.getLastEvent().empty());
+
+    closeDatabase(db);
+    return true;
+}
+
 int main()
 {
     std::cout << "Running unit tests..." << std::endl;
@@ -151,6 +190,8 @@ int main()
     std::cout << "DoorController tests passed." << std::endl;
     assert(runValidationTests());
     std::cout << "Validation tests passed." << std::endl;
+    assert(runDeviceTests());
+    std::cout << "Device tests passed." << std::endl;
     std::cout << "All unit tests passed." << std::endl;
     return 0;
 }

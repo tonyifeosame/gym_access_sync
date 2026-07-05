@@ -525,6 +525,84 @@ static std::string handleMemberChanges(sqlite3* db, const std::string& query)
     return oss.str();
 }
 
+static std::string handleDeviceHeartbeat(sqlite3* db, const std::string& body)
+{
+    std::string deviceId = parseJsonField(body, "device_id");
+    std::string status = parseJsonField(body, "status");
+    if (deviceId.empty()) {
+        return jsonError("device_id is required");
+    }
+    if (status.empty()) {
+        status = "ONLINE";
+    }
+
+    std::string details = parseJsonField(body, "details");
+    std::string lastSeen = parseJsonField(body, "last_seen");
+    if (lastSeen.empty()) {
+        lastSeen = getCurrentTimestamp();
+    }
+
+    if (!updateDeviceStatus(db, deviceId, status, lastSeen, details)) {
+        return jsonError("Failed to update device status");
+    }
+
+    auto pendingCommands = getDeviceCommands(db, deviceId, true);
+    std::ostringstream oss;
+    oss << "{\"success\":true,\"device_id\":\"" << jsonEscape(deviceId) << "\",\"status\":\"" << jsonEscape(status) << "\",\"pending_commands\":" << pendingCommands.size() << "}";
+    return oss.str();
+}
+
+static std::string handleDeviceStatus(sqlite3* db, const std::string& deviceId)
+{
+    auto status = getDeviceStatus(db, deviceId);
+    if (!status) {
+        return jsonError("Device not found");
+    }
+
+    std::ostringstream oss;
+    oss << "{\"success\":true,\"device\":{\"device_id\":\"" << jsonEscape(status->device_id) << "\",\"status\":\"" << jsonEscape(status->status) << "\",\"last_seen\":\"" << jsonEscape(status->last_seen) << "\",\"details\":\"" << jsonEscape(status->details) << "\"}}";
+    return oss.str();
+}
+
+static std::string handleDeviceCommands(sqlite3* db, const std::string& deviceId)
+{
+    auto commands = getDeviceCommands(db, deviceId, true);
+    std::ostringstream oss;
+    oss << "{\"success\":true,\"commands\":[";
+    for (size_t i = 0; i < commands.size(); ++i) {
+        if (i > 0) {
+            oss << ",";
+        }
+        oss << "{\"id\":" << commands[i].id
+            << ",\"command_type\":\"" << jsonEscape(commands[i].command_type) << "\""
+            << ",\"payload\":\"" << jsonEscape(commands[i].payload) << "\""
+            << ",\"status\":\"" << jsonEscape(commands[i].status) << "\"}";
+    }
+    oss << "]}";
+    return oss.str();
+}
+
+static std::string handleDeviceCommandPost(sqlite3* db, const std::string& body)
+{
+    std::string deviceId = parseJsonField(body, "device_id");
+    std::string commandType = parseJsonField(body, "command_type");
+    std::string payload = parseJsonField(body, "payload");
+    if (deviceId.empty() || commandType.empty()) {
+        return jsonError("device_id and command_type are required");
+    }
+
+    DeviceCommand command;
+    command.device_id = deviceId;
+    command.command_type = commandType;
+    command.payload = payload;
+    command.status = "PENDING";
+    if (!queueDeviceCommand(db, command)) {
+        return jsonError("Failed to queue device command");
+    }
+
+    return "{\"success\":true,\"queued\":true}";
+}
+
 static std::string handleStats(sqlite3* db)
 {
     auto members = getAllMembers(db);
@@ -568,8 +646,10 @@ struct ConnectionContext {
 
 static void handleConnection(SocketType client, ConnectionContext context)
 {
+    std::cout << "[server] accepted connection" << std::endl;
     sqlite3* db = nullptr;
     if (!openDatabase(db, context.db_path)) {
+        std::cout << "[server] failed to open database" << std::endl;
 #ifdef _WIN32
         closesocket(client);
 #else
@@ -584,6 +664,7 @@ static void handleConnection(SocketType client, ConnectionContext context)
     char buffer[bufferSize];
 
     int received = static_cast<int>(recv(client, buffer, bufferSize, 0));
+    std::cout << "[server] recv first chunk returned=" << received << std::endl;
     if (received <= 0) {
         closeDatabase(db);
 #ifdef _WIN32
@@ -607,6 +688,7 @@ static void handleConnection(SocketType client, ConnectionContext context)
     }
 
     HttpRequest request = parseHttpRequest(requestData);
+    std::cout << "[server] parsed request method=" << request.method << " path=" << request.path << std::endl;
     if (request.headers.count("content-length") > 0) {
         size_t contentLength = std::stoul(request.headers["content-length"]);
         auto bodyStart = headerEnd + 4;
@@ -658,6 +740,18 @@ static void handleConnection(SocketType client, ConnectionContext context)
         responseBody = handleEnrollmentResult(db, request.body);
     } else if (request.method == "GET" && path == api::kAccessLogs) {
         responseBody = handleAccessLogs(db, request);
+    } else if (request.method == "POST" && path == api::kDeviceHeartbeat) {
+        responseBody = handleDeviceHeartbeat(db, request.body);
+    } else if (request.method == "GET" && path == api::kDeviceStatus) {
+        responseBody = handleDeviceStatus(db, getQueryParam(request.query, "device_id"));
+    } else if (request.method == "POST" && path == api::kDeviceCommands) {
+        responseBody = handleDeviceCommandPost(db, request.body);
+    } else if (request.method == "GET" && path.rfind(api::kDeviceCommands, 0) == 0) {
+        std::string deviceId = urlDecode(path.substr(std::string(api::kDeviceCommands).size()));
+        if (!deviceId.empty() && deviceId[0] == '/') {
+            deviceId = deviceId.substr(1);
+        }
+        responseBody = handleDeviceCommands(db, deviceId);
     } else if (request.method == "GET" && path.rfind("/access/logs/", 0) == 0) {
         std::string memberId = urlDecode(path.substr(std::string("/access/logs/").size()));
         responseBody = handleAccessLogsByMember(db, memberId);
@@ -683,7 +777,9 @@ static void handleConnection(SocketType client, ConnectionContext context)
         responseBody = jsonError("Endpoint not found");
     }
 
+    std::cout << "[server] sending response status=" << statusCode << " body_len=" << responseBody.size() << std::endl;
     sendResponse(client, statusCode, responseBody);
+    std::cout << "[server] response sent" << std::endl;
     closeDatabase(db);
 
 #ifdef _WIN32
@@ -714,7 +810,9 @@ bool RestServer::initializeDatabaseSchema()
     bool ok = createMembersTable(db) &&
               createSyncStatusTable(db) &&
               initializeSyncStatus(db) &&
-              createAccessLogsTable(db);
+              createAccessLogsTable(db) &&
+              createDeviceCommandQueueTable(db) &&
+              createDeviceStatusTable(db);
     closeDatabase(db);
     return ok;
 }
@@ -763,6 +861,7 @@ void RestServer::serverLoop()
 #endif
 
     SocketType serverSocket = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+
 #ifdef _WIN32
     server_socket_ = static_cast<uintptr_t>(serverSocket);
     if (serverSocket == INVALID_SOCKET) {
@@ -780,10 +879,20 @@ void RestServer::serverLoop()
     serverAddress.sin_port = htons(static_cast<uint16_t>(config_.port));
 
     int reuse = 1;
-    setsockopt(serverSocket, SOL_SOCKET, SO_REUSEADDR, reinterpret_cast<const char*>(&reuse), sizeof(reuse));
+    setsockopt(
+        serverSocket,
+        SOL_SOCKET,
+        SO_REUSEADDR,
+        reinterpret_cast<const char*>(&reuse),
+        sizeof(reuse));
 
-    if (bind(serverSocket, reinterpret_cast<sockaddr*>(&serverAddress), sizeof(serverAddress)) < 0) {
-        std::cerr << "Failed to bind socket on port " << config_.port << std::endl;
+    if (bind(serverSocket,
+             reinterpret_cast<sockaddr*>(&serverAddress),
+             sizeof(serverAddress)) < 0)
+    {
+        std::cerr << "Failed to bind socket on port "
+                  << config_.port << std::endl;
+
 #ifdef _WIN32
         closesocket(serverSocket);
         WSACleanup();
@@ -793,8 +902,10 @@ void RestServer::serverLoop()
         return;
     }
 
-    if (listen(serverSocket, 10) < 0) {
+    if (listen(serverSocket, 10) < 0)
+    {
         std::cerr << "Failed to listen on socket" << std::endl;
+
 #ifdef _WIN32
         closesocket(serverSocket);
         WSACleanup();
@@ -805,24 +916,39 @@ void RestServer::serverLoop()
     }
 
     running_.store(true);
-    std::cout << "REST server running on http://localhost:" << config_.port << std::endl;
+
+    std::cout << "REST server running on http://localhost:"
+              << config_.port << std::endl;
 
     ConnectionContext context{config_.db_path, config_.api_key};
 
-    while (!stop_requested_.load()) {
+    while (!stop_requested_.load())
+    {
+        std::cout << "[server] waiting in accept()" << std::endl;
+
         sockaddr_in clientAddress{};
         socklen_t clientLen = sizeof(clientAddress);
-        SocketType clientSocket = accept(serverSocket, reinterpret_cast<sockaddr*>(&clientAddress), &clientLen);
+
+        SocketType clientSocket =
+            accept(serverSocket,
+                   reinterpret_cast<sockaddr*>(&clientAddress),
+                   &clientLen);
+
 #ifdef _WIN32
-        if (clientSocket == INVALID_SOCKET) {
+        if (clientSocket == INVALID_SOCKET)
 #else
-        if (clientSocket < 0) {
+        if (clientSocket < 0)
 #endif
-            if (stop_requested_.load()) {
+        {
+            std::cout << "[server] accept returned error" << std::endl;
+
+            if (stop_requested_.load())
                 break;
-            }
+
             continue;
         }
+
+        std::cout << "[server] accepted socket" << std::endl;
 
         std::thread(handleConnection, clientSocket, context).detach();
     }
@@ -830,8 +956,10 @@ void RestServer::serverLoop()
 #ifdef _WIN32
     closesocket(serverSocket);
     WSACleanup();
+    server_socket_ = static_cast<uintptr_t>(-1);
 #else
     close(serverSocket);
+    server_socket_ = -1;
 #endif
 
     running_.store(false);

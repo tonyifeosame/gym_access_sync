@@ -1,5 +1,24 @@
 #include "database.h"
+#include <chrono>
+#include <ctime>
+#include <iomanip>
 #include <iostream>
+#include <sstream>
+
+static std::string getCurrentTimestamp()
+{
+    auto now = std::chrono::system_clock::now();
+    std::time_t tt = std::chrono::system_clock::to_time_t(now);
+    std::tm local_tm{};
+#if defined(_WIN32) || defined(_WIN64)
+    localtime_s(&local_tm, &tt);
+#else
+    localtime_r(&tt, &local_tm);
+#endif
+    std::ostringstream oss;
+    oss << std::put_time(&local_tm, "%Y-%m-%d %H:%M:%S");
+    return oss.str();
+}
 
 bool openDatabase(sqlite3*& db, const std::string& path)
 {
@@ -98,6 +117,182 @@ bool initializeSyncStatus(sqlite3* db)
 {
     const char* sql = "INSERT OR IGNORE INTO sync_status (id, last_sync_time) VALUES (1, '1970-01-01 00:00:00');";
     return sqlite3_exec(db, sql, nullptr, nullptr, nullptr) == SQLITE_OK;
+}
+
+bool createDeviceCommandQueueTable(sqlite3* db)
+{
+    const char* sql =
+        "CREATE TABLE IF NOT EXISTS device_commands ("
+        "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+        "device_id TEXT NOT NULL, "
+        "command_type TEXT NOT NULL, "
+        "payload TEXT, "
+        "status TEXT DEFAULT 'PENDING', "
+        "created_at TEXT, "
+        "updated_at TEXT"
+        ");";
+    return sqlite3_exec(db, sql, nullptr, nullptr, nullptr) == SQLITE_OK;
+}
+
+bool createDeviceStatusTable(sqlite3* db)
+{
+    const char* sql =
+        "CREATE TABLE IF NOT EXISTS device_status ("
+        "device_id TEXT PRIMARY KEY, "
+        "status TEXT, "
+        "last_seen TEXT, "
+        "details TEXT, "
+        "updated_at TEXT"
+        ");";
+    return sqlite3_exec(db, sql, nullptr, nullptr, nullptr) == SQLITE_OK;
+}
+
+bool queueDeviceCommand(sqlite3* db, const DeviceCommand& command)
+{
+    const char* sql =
+        "INSERT INTO device_commands (device_id, command_type, payload, status, created_at, updated_at) "
+        "VALUES (?, ?, ?, ?, ?, ?);";
+    sqlite3_stmt* stmt = nullptr;
+
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) != SQLITE_OK) {
+        return false;
+    }
+
+    const std::string createdAt = command.created_at.empty() ? getCurrentTimestamp() : command.created_at;
+    const std::string updatedAt = command.updated_at.empty() ? createdAt : command.updated_at;
+
+    sqlite3_bind_text(stmt, 1, command.device_id.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 2, command.command_type.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 3, command.payload.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 4, command.status.empty() ? "PENDING" : command.status.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 5, createdAt.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 6, updatedAt.c_str(), -1, SQLITE_TRANSIENT);
+
+    bool success = sqlite3_step(stmt) == SQLITE_DONE;
+    sqlite3_finalize(stmt);
+    return success;
+}
+
+std::vector<DeviceCommand> getDeviceCommands(sqlite3* db, const std::string& device_id, bool pending_only)
+{
+    std::string sql =
+        "SELECT id, device_id, command_type, payload, status, created_at, updated_at "
+        "FROM device_commands WHERE device_id = ?";
+    if (pending_only) {
+        sql += " AND status = 'PENDING'";
+    }
+    sql += " ORDER BY id ASC;";
+
+    sqlite3_stmt* stmt = nullptr;
+    std::vector<DeviceCommand> commands;
+    if (sqlite3_prepare_v2(db, sql.c_str(), -1, &stmt, nullptr) != SQLITE_OK) {
+        return commands;
+    }
+
+    sqlite3_bind_text(stmt, 1, device_id.c_str(), -1, SQLITE_TRANSIENT);
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+        DeviceCommand command;
+        command.id = sqlite3_column_int(stmt, 0);
+        command.device_id = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 1));
+        command.command_type = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 2));
+        command.payload = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 3));
+        command.status = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 4));
+        command.created_at = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 5));
+        command.updated_at = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 6));
+        commands.push_back(command);
+    }
+    sqlite3_finalize(stmt);
+    return commands;
+}
+
+bool markDeviceCommandCompleted(sqlite3* db, int command_id, const std::string& status)
+{
+    const char* sql = "UPDATE device_commands SET status = ?, updated_at = ? WHERE id = ?;";
+    sqlite3_stmt* stmt = nullptr;
+
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) != SQLITE_OK) {
+        return false;
+    }
+
+    sqlite3_bind_text(stmt, 1, status.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 2, getCurrentTimestamp().c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int(stmt, 3, command_id);
+
+    bool success = sqlite3_step(stmt) == SQLITE_DONE;
+    sqlite3_finalize(stmt);
+    return success;
+}
+
+bool updateDeviceStatus(sqlite3* db, const std::string& device_id, const std::string& status, const std::string& last_seen, const std::string& details)
+{
+    const char* sql =
+        "INSERT OR REPLACE INTO device_status (device_id, status, last_seen, details, updated_at) "
+        "VALUES (?, ?, ?, ?, ?);";
+    sqlite3_stmt* stmt = nullptr;
+
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) != SQLITE_OK) {
+        return false;
+    }
+
+    const std::string updatedAt = getCurrentTimestamp();
+    sqlite3_bind_text(stmt, 1, device_id.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 2, status.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 3, last_seen.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 4, details.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 5, updatedAt.c_str(), -1, SQLITE_TRANSIENT);
+
+    bool success = sqlite3_step(stmt) == SQLITE_DONE;
+    sqlite3_finalize(stmt);
+    return success;
+}
+
+std::optional<DeviceStatus> getDeviceStatus(sqlite3* db, const std::string& device_id)
+{
+    const char* sql = "SELECT device_id, status, last_seen, details, updated_at FROM device_status WHERE device_id = ?;";
+    sqlite3_stmt* stmt = nullptr;
+    std::optional<DeviceStatus> result;
+
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) != SQLITE_OK) {
+        return result;
+    }
+
+    sqlite3_bind_text(stmt, 1, device_id.c_str(), -1, SQLITE_TRANSIENT);
+    if (sqlite3_step(stmt) == SQLITE_ROW) {
+        DeviceStatus status;
+        status.device_id = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0));
+        status.status = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 1));
+        status.last_seen = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 2));
+        status.details = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 3));
+        status.updated_at = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 4));
+        result = status;
+    }
+
+    sqlite3_finalize(stmt);
+    return result;
+}
+
+std::vector<DeviceStatus> getAllDeviceStatuses(sqlite3* db)
+{
+    const char* sql = "SELECT device_id, status, last_seen, details, updated_at FROM device_status ORDER BY updated_at DESC;";
+    sqlite3_stmt* stmt = nullptr;
+    std::vector<DeviceStatus> statuses;
+
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) != SQLITE_OK) {
+        return statuses;
+    }
+
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+        DeviceStatus status;
+        status.device_id = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0));
+        status.status = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 1));
+        status.last_seen = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 2));
+        status.details = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 3));
+        status.updated_at = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 4));
+        statuses.push_back(status);
+    }
+
+    sqlite3_finalize(stmt);
+    return statuses;
 }
 
 bool updateLastSyncTime(sqlite3* db, const std::string& timestamp)

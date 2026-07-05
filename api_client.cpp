@@ -2,6 +2,7 @@
 #include "api_paths.h"
 #include "database.h"
 #include <fstream>
+#include <iostream>
 #include <sstream>
 #include <algorithm>
 #include <cctype>
@@ -20,6 +21,7 @@ using SocketType = SOCKET;
 #include <sys/socket.h>
 #include <sys/types.h>
 #include <unistd.h>
+#include <fcntl.h>
 using SocketType = int;
 #endif
 
@@ -195,13 +197,14 @@ static std::optional<HttpResponse> httpGet(const std::string& url, const ApiConf
     addrinfo hints{};
     hints.ai_family = AF_UNSPEC;
     hints.ai_socktype = SOCK_STREAM;
-
+std::cout << "[httpGet] Step 1" << std::endl;
     addrinfo* result = nullptr;
     if (getaddrinfo(host.c_str(), std::to_string(port).c_str(), &hints, &result) != 0) {
         return std::nullopt;
     }
 
     SocketType sock = INVALID_SOCKET;
+    bool connected = false;
     for (addrinfo* rp = result; rp != nullptr; rp = rp->ai_next) {
         sock = socket(rp->ai_family, rp->ai_socktype, rp->ai_protocol);
 #ifdef _WIN32
@@ -213,9 +216,47 @@ static std::optional<HttpResponse> httpGet(const std::string& url, const ApiConf
             continue;
         }
 #endif
-        if (connect(sock, rp->ai_addr, static_cast<int>(rp->ai_addrlen)) == 0) {
+std::cout << "[httpGet] Step 2" << std::endl;
+
+#ifdef _WIN32
+        u_long mode = 1;
+        ioctlsocket(sock, FIONBIO, &mode);
+#else
+        int flags = fcntl(sock, F_GETFL, 0);
+        fcntl(sock, F_SETFL, flags | O_NONBLOCK);
+#endif
+
+        int connectResult = connect(sock, rp->ai_addr, static_cast<int>(rp->ai_addrlen));
+        if (connectResult == 0) {
+            connected = true;
             break;
         }
+
+#ifdef _WIN32
+        if (WSAGetLastError() == WSAEWOULDBLOCK) {
+#else
+        if (errno == EINPROGRESS) {
+#endif
+            fd_set writeSet;
+            FD_ZERO(&writeSet);
+            FD_SET(sock, &writeSet);
+
+            timeval timeout;
+            timeout.tv_sec = 2;
+            timeout.tv_usec = 0;
+
+            int selectResult = select(static_cast<int>(sock) + 1, nullptr, &writeSet, nullptr, &timeout);
+            if (selectResult > 0) {
+                int soError = 0;
+                socklen_t len = sizeof(soError);
+                getsockopt(sock, SOL_SOCKET, SO_ERROR, reinterpret_cast<char*>(&soError), &len);
+                if (soError == 0) {
+                    connected = true;
+                    break;
+                }
+            }
+        }
+
         closeSocket(sock);
         sock = INVALID_SOCKET;
     }
@@ -223,12 +264,20 @@ static std::optional<HttpResponse> httpGet(const std::string& url, const ApiConf
     freeaddrinfo(result);
 
 #ifdef _WIN32
-    if (sock == INVALID_SOCKET) {
+    if (sock == INVALID_SOCKET || !connected) {
 #else
-    if (sock < 0) {
+    if (sock < 0 || !connected) {
 #endif
         return std::nullopt;
     }
+
+#ifdef _WIN32
+    u_long mode = 0;
+    ioctlsocket(sock, FIONBIO, &mode);
+#else
+    int flags = fcntl(sock, F_GETFL, 0);
+    fcntl(sock, F_SETFL, flags & ~O_NONBLOCK);
+#endif
 
     std::ostringstream request;
     request << "GET " << path << " HTTP/1.1\r\n";
@@ -241,11 +290,13 @@ static std::optional<HttpResponse> httpGet(const std::string& url, const ApiConf
     request << "\r\n";
 
     std::string requestText = request.str();
+    std::cout << "[integration] >>> GET " << path << std::endl;
     send(sock, requestText.c_str(), static_cast<int>(requestText.size()), 0);
 
     std::string response;
     char buffer[4096];
     int bytesReceived = 0;
+    std::cout << "[httpGet] Step 3" << std::endl;
     while ((bytesReceived = recv(sock, buffer, sizeof(buffer), 0)) > 0) {
         response.append(buffer, bytesReceived);
     }
@@ -259,6 +310,7 @@ static std::optional<HttpResponse> httpGet(const std::string& url, const ApiConf
     std::string header = response.substr(0, headerEnd);
     std::string body = response.substr(headerEnd + 4);
     int statusCode = 0;
+    std::cout << "[integration] GET " << path << " completed status=" << statusCode << " body_len=" << body.size() << std::endl;
 
     auto firstLineEnd = header.find("\r\n");
     std::string statusLine = (firstLineEnd == std::string::npos) ? header : header.substr(0, firstLineEnd);
@@ -335,33 +387,85 @@ static std::optional<HttpResponse> httpPost(const std::string& url, const ApiCon
     }
 
     SocketType sock = INVALID_SOCKET;
+    bool connected = false;
     for (addrinfo* rp = result; rp != nullptr; rp = rp->ai_next) {
-        sock = socket(rp->ai_family, rp->ai_socktype, rp->ai_protocol);
+    sock = socket(rp->ai_family, rp->ai_socktype, rp->ai_protocol);
+
 #ifdef _WIN32
-        if (sock == INVALID_SOCKET) {
-            continue;
-        }
-#else
-        if (sock < 0) {
-            continue;
-        }
-#endif
-        if (connect(sock, rp->ai_addr, static_cast<int>(rp->ai_addrlen)) == 0) {
-            break;
-        }
-        closeSocket(sock);
-        sock = INVALID_SOCKET;
+    if (sock == INVALID_SOCKET) {
+        continue;
     }
+#else
+    if (sock < 0) {
+        continue;
+    }
+#endif
+
+    std::cout << "[httpGet] before connect" << std::endl;
+
+#ifdef _WIN32
+    u_long mode = 1;
+    ioctlsocket(sock, FIONBIO, &mode);
+#else
+    int flags = fcntl(sock, F_GETFL, 0);
+    fcntl(sock, F_SETFL, flags | O_NONBLOCK);
+#endif
+
+    int connectResult = connect(sock, rp->ai_addr, static_cast<int>(rp->ai_addrlen));
+    if (connectResult == 0) {
+        std::cout << "[httpGet] connect succeeded" << std::endl;
+        connected = true;
+        break;
+    }
+
+#ifdef _WIN32
+    if (WSAGetLastError() == WSAEWOULDBLOCK) {
+#else
+    if (errno == EINPROGRESS) {
+#endif
+        fd_set writeSet;
+        FD_ZERO(&writeSet);
+        FD_SET(sock, &writeSet);
+
+        timeval timeout;
+        timeout.tv_sec = 2;
+        timeout.tv_usec = 0;
+
+        int selectResult = select(static_cast<int>(sock) + 1, nullptr, &writeSet, nullptr, &timeout);
+        if (selectResult > 0) {
+            int soError = 0;
+            socklen_t len = sizeof(soError);
+            getsockopt(sock, SOL_SOCKET, SO_ERROR, reinterpret_cast<char*>(&soError), &len);
+            if (soError == 0) {
+                connected = true;
+                break;
+            }
+        }
+    }
+
+    std::cout << "[httpGet] connect failed" << std::endl;
+
+    closeSocket(sock);
+    sock = INVALID_SOCKET;
+}
 
     freeaddrinfo(result);
 
 #ifdef _WIN32
-    if (sock == INVALID_SOCKET) {
+    if (sock == INVALID_SOCKET || !connected) {
 #else
-    if (sock < 0) {
+    if (sock < 0 || !connected) {
 #endif
         return std::nullopt;
     }
+
+#ifdef _WIN32
+    u_long mode = 0;
+    ioctlsocket(sock, FIONBIO, &mode);
+#else
+    int flags = fcntl(sock, F_GETFL, 0);
+    fcntl(sock, F_SETFL, flags & ~O_NONBLOCK);
+#endif
 
     std::ostringstream request;
     request << "POST " << path << " HTTP/1.1\r\n";
@@ -377,6 +481,7 @@ static std::optional<HttpResponse> httpPost(const std::string& url, const ApiCon
     request << body;
 
     std::string requestText = request.str();
+    std::cout << "[integration] >>> POST " << path << std::endl;
     send(sock, requestText.c_str(), static_cast<int>(requestText.size()), 0);
 
     std::string response;
@@ -395,6 +500,7 @@ static std::optional<HttpResponse> httpPost(const std::string& url, const ApiCon
     std::string header = response.substr(0, headerEnd);
     std::string bodyResponse = response.substr(headerEnd + 4);
     int statusCode = 0;
+    std::cout << "[integration] POST " << path << " completed status=" << statusCode << " body_len=" << bodyResponse.size() << std::endl;
 
     auto firstLineEnd = header.find("\r\n");
     std::string statusLine = (firstLineEnd == std::string::npos) ? header : header.substr(0, firstLineEnd);
@@ -706,6 +812,8 @@ std::optional<AccessResult> ApiClient::checkIn(const std::string& member_id, sql
     const AccessResult& access = *accessOpt;
     std::string logSource = access.source;
     if (logSource == "API") {
+        logSource = "terminal-check-in";
+    } else if (logSource == "OFFLINE_CACHE") {
         logSource = "terminal-check-in";
     }
 

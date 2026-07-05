@@ -3,6 +3,8 @@
 #include <atomic>
 #include <string>
 #include <thread>
+#include <vector>
+
 
 class RestServer {
 public:
@@ -29,7 +31,10 @@ private:
     Config config_;
     std::atomic<bool> running_{false};
     std::atomic<bool> stop_requested_{false};
+
     std::thread server_thread_;
+   
+
 #ifdef _WIN32
     uintptr_t server_socket_ = static_cast<uintptr_t>(-1);
 #else

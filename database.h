@@ -33,9 +33,35 @@ struct AccessLog {
     std::string idempotency_key;
 };
 
+struct DeviceCommand {
+    int id = 0;
+    std::string device_id;
+    std::string command_type;
+    std::string payload;
+    std::string status;
+    std::string created_at;
+    std::string updated_at;
+};
+
+struct DeviceStatus {
+    std::string device_id;
+    std::string status;
+    std::string last_seen;
+    std::string details;
+    std::string updated_at;
+};
+
 bool createAccessLogsTable(sqlite3* db);
 std::vector<AccessLog> getAccessLogs(sqlite3* db);
 std::vector<AccessLog> getLogsByMember(sqlite3* db, const std::string& member_id);
 std::vector<AccessLog> getLogsByDate(sqlite3* db, const std::string& date);
 bool logAccessAttempt(sqlite3* db, const std::string& member_id, bool granted, const std::string& reason, const std::string& timestamp, const std::string& source, const std::string& idempotency_key = "");
+bool createDeviceCommandQueueTable(sqlite3* db);
+bool createDeviceStatusTable(sqlite3* db);
+bool queueDeviceCommand(sqlite3* db, const DeviceCommand& command);
+std::vector<DeviceCommand> getDeviceCommands(sqlite3* db, const std::string& device_id, bool pending_only = true);
+bool markDeviceCommandCompleted(sqlite3* db, int command_id, const std::string& status = "COMPLETED");
+bool updateDeviceStatus(sqlite3* db, const std::string& device_id, const std::string& status, const std::string& last_seen, const std::string& details);
+std::optional<DeviceStatus> getDeviceStatus(sqlite3* db, const std::string& device_id);
+std::vector<DeviceStatus> getAllDeviceStatuses(sqlite3* db);
 void closeDatabase(sqlite3* db);
