@@ -197,7 +197,6 @@ static std::optional<HttpResponse> httpGet(const std::string& url, const ApiConf
     addrinfo hints{};
     hints.ai_family = AF_UNSPEC;
     hints.ai_socktype = SOCK_STREAM;
-std::cout << "[httpGet] Step 1" << std::endl;
     addrinfo* result = nullptr;
     if (getaddrinfo(host.c_str(), std::to_string(port).c_str(), &hints, &result) != 0) {
         return std::nullopt;
@@ -216,7 +215,6 @@ std::cout << "[httpGet] Step 1" << std::endl;
             continue;
         }
 #endif
-std::cout << "[httpGet] Step 2" << std::endl;
 
 #ifdef _WIN32
         u_long mode = 1;
@@ -290,13 +288,11 @@ std::cout << "[httpGet] Step 2" << std::endl;
     request << "\r\n";
 
     std::string requestText = request.str();
-    std::cout << "[integration] >>> GET " << path << std::endl;
     send(sock, requestText.c_str(), static_cast<int>(requestText.size()), 0);
 
     std::string response;
     char buffer[4096];
     int bytesReceived = 0;
-    std::cout << "[httpGet] Step 3" << std::endl;
     while ((bytesReceived = recv(sock, buffer, sizeof(buffer), 0)) > 0) {
         response.append(buffer, bytesReceived);
     }
@@ -310,7 +306,6 @@ std::cout << "[httpGet] Step 2" << std::endl;
     std::string header = response.substr(0, headerEnd);
     std::string body = response.substr(headerEnd + 4);
     int statusCode = 0;
-    std::cout << "[integration] GET " << path << " completed status=" << statusCode << " body_len=" << body.size() << std::endl;
 
     auto firstLineEnd = header.find("\r\n");
     std::string statusLine = (firstLineEnd == std::string::npos) ? header : header.substr(0, firstLineEnd);
@@ -401,8 +396,6 @@ static std::optional<HttpResponse> httpPost(const std::string& url, const ApiCon
     }
 #endif
 
-    std::cout << "[httpGet] before connect" << std::endl;
-
 #ifdef _WIN32
     u_long mode = 1;
     ioctlsocket(sock, FIONBIO, &mode);
@@ -413,7 +406,6 @@ static std::optional<HttpResponse> httpPost(const std::string& url, const ApiCon
 
     int connectResult = connect(sock, rp->ai_addr, static_cast<int>(rp->ai_addrlen));
     if (connectResult == 0) {
-        std::cout << "[httpGet] connect succeeded" << std::endl;
         connected = true;
         break;
     }
@@ -442,8 +434,6 @@ static std::optional<HttpResponse> httpPost(const std::string& url, const ApiCon
             }
         }
     }
-
-    std::cout << "[httpGet] connect failed" << std::endl;
 
     closeSocket(sock);
     sock = INVALID_SOCKET;
@@ -481,7 +471,6 @@ static std::optional<HttpResponse> httpPost(const std::string& url, const ApiCon
     request << body;
 
     std::string requestText = request.str();
-    std::cout << "[integration] >>> POST " << path << std::endl;
     send(sock, requestText.c_str(), static_cast<int>(requestText.size()), 0);
 
     std::string response;
@@ -500,7 +489,6 @@ static std::optional<HttpResponse> httpPost(const std::string& url, const ApiCon
     std::string header = response.substr(0, headerEnd);
     std::string bodyResponse = response.substr(headerEnd + 4);
     int statusCode = 0;
-    std::cout << "[integration] POST " << path << " completed status=" << statusCode << " body_len=" << bodyResponse.size() << std::endl;
 
     auto firstLineEnd = header.find("\r\n");
     std::string statusLine = (firstLineEnd == std::string::npos) ? header : header.substr(0, firstLineEnd);
